@@ -1,0 +1,44 @@
+name: Closeout Debrief Reconciliation
+
+# Triggered by an HTTP POST from Power Automate (repository_dispatch).
+# The closeout webhook body is passed in client_payload.
+# A manual trigger is also provided for testing with a pasted payload.
+on:
+  repository_dispatch:
+    types: [closeout_submitted]
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: "Closeout webhook JSON (full webhook or just the body)"
+        required: true
+        type: string
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run reconciliation
+        env:
+          # Closeout payload — from repository_dispatch or the manual input.
+          CLOSEOUT_PAYLOAD: ${{ toJSON(github.event.client_payload) != 'null' && toJSON(github.event.client_payload) || github.event.inputs.payload }}
+          # Microsoft Graph / Entra (Foxtrot Report Automation app)
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          # Claude API for drafting the discrepancy email
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Pull debriefs from SharePoint via Graph (not local files)
+          DEBRIEF_SOURCE: graph
+          SEND_EMAIL: "true"
+        run: python closeout_debrief_reconciler.py
