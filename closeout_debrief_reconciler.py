@@ -480,6 +480,8 @@ def reconcile(body):
             "closeout_tail_count": len(co_tails),
             "debrief_tail_count": len(db_tails),
             "discrepancies": d,
+            # tail -> sorted service codes, as serviced per the closeout
+            "serviced": {t: sorted(s) for t, s in co_tails.items()},
         }
         if any(d.values()):
             has_any = True
@@ -552,7 +554,8 @@ def send_email_via_graph(email):
     payload = {
         "message": {
             "subject": email["subject"],
-            "body": {"contentType": "Text", "content": email["body"]},
+            "body": {"contentType": email.get("content_type", "Text"),
+                     "content": email["body"]},
             "toRecipients": [{"emailAddress": {"address": a}} for a in email["to"]],
         },
         "saveToSentItems": True,
@@ -564,6 +567,43 @@ def send_email_via_graph(email):
     if resp.status_code not in (200, 202):
         raise RuntimeError(f"sendMail failed ({resp.status_code}): {resp.text[:300]}")
     return True
+
+
+def build_clean_email(report):
+    """Build the no-discrepancy confirmation email deterministically (no API).
+    Includes an HTML table of every tail serviced and its services."""
+    import html
+
+    loc = report["location"]
+    subject = f"{loc} closeout — no discrepancies ({report['date']})"
+
+    intro = (f"{loc} had no discrepancies between the services on the closeout "
+             f"and the debriefs.")
+
+    # Collect rows across all fleets: (tail, fleet, services-string)
+    rows = []
+    for fleet, info in report["fleets"].items():
+        for tail, services in sorted(info.get("serviced", {}).items()):
+            rows.append((tail, fleet, ", ".join(services) if services else "—"))
+
+    th = ('style="text-align:left;padding:6px 12px;border:1px solid #ccc;'
+          'background:#1F3864;color:#fff;"')
+    td = 'style="padding:6px 12px;border:1px solid #ccc;"'
+    header = (f"<tr><th {th}>Tail Number</th><th {th}>Fleet</th>"
+              f"<th {th}>Services</th></tr>")
+    body_rows = "".join(
+        f"<tr><td {td}>{html.escape(t)}</td><td {td}>{html.escape(f)}</td>"
+        f"<td {td}>{html.escape(s)}</td></tr>" for t, f, s in rows)
+    table = (f'<table style="border-collapse:collapse;font-family:Arial,'
+             f'sans-serif;font-size:13px;">{header}{body_rows}</table>')
+
+    body_html = (f'<div style="font-family:Arial,sans-serif;font-size:14px;">'
+                 f'<p>{html.escape(intro)}</p>'
+                 f'<p><b>Aircraft serviced ({len(rows)}):</b></p>'
+                 f'{table}</div>')
+
+    return {"subject": subject, "body": body_html, "content_type": "HTML",
+            "to": EMAIL_TO, "from": EMAIL_FROM}
 
 
 # ----- TEXT REPORT (no-API fallback / logging) -------------------------------
@@ -646,18 +686,24 @@ def main():
     # Always log a human-readable report to the Actions console.
     print(format_report(report), flush=True)
 
-    if report.get("skipped") or not report.get("has_discrepancies"):
-        return  # nothing to email
+    if report.get("skipped"):
+        return  # location skipped (DFW/IAH/STL AD HOC) or unparseable — no email
 
-    email = draft_discrepancy_email(report)
+    send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
+
+    if report.get("has_discrepancies"):
+        email = draft_discrepancy_email(report)   # Claude API
+    else:
+        email = build_clean_email(report)         # deterministic, no API
     if email is None:
         return
-    # Draft to the log so it's visible even if sending fails.
-    print("\n----- DRAFTED EMAIL -----", flush=True)
+
+    # Log the draft so it's visible even if sending fails.
+    print("\n----- EMAIL -----", flush=True)
     print(f"To: {', '.join(email['to'])}\nSubject: {email['subject']}\n", flush=True)
     print(email["body"], flush=True)
 
-    if os.environ.get("SEND_EMAIL", "true").lower() == "true":
+    if send_on:
         send_email_via_graph(email)
         print("\n[sent via Graph]", flush=True)
     else:
