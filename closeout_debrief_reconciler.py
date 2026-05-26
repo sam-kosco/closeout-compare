@@ -611,8 +611,11 @@ def _load_payload():
       2. CLOSEOUT_PAYLOAD env var containing the JSON string (set by the workflow
          from the repository_dispatch client_payload).
       3. CLOSEOUT_PAYLOAD_FILE env var: path to a JSON file.
-    Accepts either the full webhook ({"headers":..,"body":..}) or just the body
-    dict; returns the body dict.
+
+    Unwraps to the closeout body dict (the object whose keys are "6", "4", "27"...)
+    regardless of how it is nested. GitHub's repository_dispatch caps client_payload
+    at 10 top-level properties, so the flow wraps the body under a single
+    "closeout" key; this also accepts a "body" wrapper or a bare body.
     """
     import sys
     raw = None
@@ -628,7 +631,12 @@ def _load_payload():
         raise SystemExit("No payload provided (CLI arg, CLOSEOUT_PAYLOAD, "
                          "or CLOSEOUT_PAYLOAD_FILE).")
     data = json.loads(raw)
-    return data.get("body", data)
+    # Peel known wrapper keys until we reach the dict that holds the closeout
+    # fields. Order matters: client_payload -> closeout -> body.
+    for key in ("client_payload", "closeout", "body"):
+        while isinstance(data, dict) and key in data and isinstance(data[key], dict):
+            data = data[key]
+    return data
 
 
 def main():
