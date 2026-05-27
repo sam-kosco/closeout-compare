@@ -91,7 +91,7 @@ ENVOY_IGNORE_LOCATIONS = {"DFW"}
 # the to/from envelope. Overridable via EMAIL_TO env (comma-separated).
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "foxtrot.automation@foxtrotaviation.com")
 EMAIL_TO   = [e.strip() for e in os.environ.get(
-    "EMAIL_TO", "samuel.kosco@foxtrotaviation.com").split(",") if e.strip()]
+    "EMAIL_TO", "samuel.kosco@foxtrotaviation.com,clara.lana@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com").split(",") if e.strip()]
 CLAUDE_MODEL = "claude-opus-4-7"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
