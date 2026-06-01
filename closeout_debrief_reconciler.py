@@ -45,7 +45,9 @@ TAIL_LEVEL_ONLY = False
 
 # (3) Locations that must NOT be processed (skip the whole run if matched).
 #     STL AD HOC is a distinct location string from STL; STL (GoJet) IS processed.
-SKIP_LOCATIONS = {"DFW", "IAH", "STL AD HOC"}
+#     IAH was previously skipped; it is now reconciled via the Mesa debrief
+#     workbook off field 298.
+SKIP_LOCATIONS = {"DFW", "STL AD HOC"}
 
 # ----- DEBRIEF SOURCE ---------------------------------------------------------
 # DEBRIEF_SOURCE = "graph"  -> download workbooks from SharePoint via Microsoft
@@ -58,14 +60,16 @@ DEBRIEF_PATHS = {
     "GoJet": os.environ.get("GOJET_DEBRIEF",  "/mnt/user-data/uploads/GoJet_Debriefs.xlsx"),
     "PSA":   os.environ.get("PSA_DEBRIEF",    "/mnt/user-data/uploads/PSA_Debriefs.xlsx"),
     "Envoy": os.environ.get("ENVOY_DEBRIEF",  "/mnt/user-data/uploads/Envoy_Debriefs.xlsx"),
+    "Mesa":  os.environ.get("MESA_DEBRIEF",   "/mnt/user-data/uploads/Mesa_Debriefs.xlsx"),
 }
 
 # SharePoint file paths (used when DEBRIEF_SOURCE == "graph"), relative to the
-# root of the DataHub Shared Documents drive. All three confirmed.
+# root of the DataHub Shared Documents drive.
 DEBRIEF_SP_PATHS = {
     "PSA":   "Power Flows/Debriefs/PSA Debriefs.xlsx",
     "Envoy": "Power Flows/Debriefs/Envoy Debriefs.xlsx",
     "GoJet": "Power Flows/Debriefs/GoJet Debriefs.xlsx",
+    "Mesa":  "Power Flows/Debriefs/Mesa Debriefs.xlsx",
 }
 
 # Microsoft Graph / Entra credentials. Same Foxtrot Report Automation app used by
@@ -82,7 +86,8 @@ GRAPH_DRIVE_ID = os.environ.get(
 GRAPH_FETCH_RETRIES = int(os.environ.get("GRAPH_FETCH_RETRIES", "3"))
 GRAPH_FETCH_DELAY_SEC = int(os.environ.get("GRAPH_FETCH_DELAY_SEC", "20"))
 
-DEBRIEF_SHEETS = {"GoJet": "Sheet1", "PSA": "Debriefs", "Envoy": "Envoy General"}
+DEBRIEF_SHEETS = {"GoJet": "Sheet1", "PSA": "Debriefs", "Envoy": "Envoy General",
+                  "Mesa": "Sheet1"}
 # Envoy DFW debriefs are explicitly ignored (separate 'DFW' sheet AND DFW rows
 # inside 'Envoy General' are both excluded).
 ENVOY_IGNORE_LOCATIONS = {"DFW"}
@@ -97,7 +102,11 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # ----- SERVICE VOCABULARY NORMALIZATION --------------------------------------
 # Both systems get mapped to a single canonical code set so they can be compared.
-# Canonical codes: I, Ex, CC, DSC, CE, ED1, ED2, ED3, ED4, IHC, RON, LAV
+# Canonical codes: I, Ex, CC, DSC, CE, ED1, ED2, ED3, ED4, IHC, RON, LAV,
+#                  plus Mesa-specific: EC, ED, FCD, ESS, Flight Deck.
+# (Mesa uses EC/ED distinct from Ex/ED1-4 because the JotForm field 298 multi-
+# select exposes the Mesa abbreviations directly. Reconciliation is per-fleet so
+# the separate codes never compare across fleets.)
 
 # Closeout 'Service Performed' tokens -> canonical
 CLOSEOUT_TOKEN_MAP = {
@@ -110,10 +119,17 @@ CLOSEOUT_TOKEN_MAP = {
     "IHC": "IHC",
     "RON": "RON",
     "LAV": "LAV",
+    # Mesa (IAH) field 298 abbreviations
+    "EC": "EC",
+    "ED": "ED",
+    "FCD": "FCD",
+    "ESS": "ESS",
+    "FLIGHT DECK": "Flight Deck",
 }
 
 # Debrief column header -> canonical (only service columns; cols 0-3 are
-# Date/Name/Location/Tail and the last is Sub ID).
+# Date/Name/Location/Tail and the last is Sub ID — except the Mesa workbook,
+# which has no Location column so Tail sits at col 2).
 DEBRIEF_COL_MAP = {
     "Interior Clean (I)": "I",
     "Exterior Clean (E)": "Ex",
@@ -130,6 +146,12 @@ DEBRIEF_COL_MAP = {
     "Interior Heavy Clean (IHC)": "IHC",
     "IHC": "IHC",
     "RON Clean (RON)": "RON",
+    # Mesa-specific columns
+    "Exterior Clean (EC)": "EC",
+    "Exterior Detail (ED)": "ED",
+    "Fleet Campaign Decal (FCD)": "FCD",
+    "Disinfection (ESS)": "ESS",
+    "Detailed Flight Deck Clean (Flight Deck)": "Flight Deck",
 }
 
 
@@ -159,13 +181,17 @@ def _canon_closeout_service(raw_service_string):
 
 
 # ----- CLOSEOUT EXTRACTION ----------------------------------------------------
-# Reuses the verified field map: 6=Location, 4=Date, 3=Submitter,
-# 281=GoJet (tail key 'Tail Number'), 27=PSA ('Dropdown'), 45=Envoy ('Tail Number').
+# Verified field map: 6=Location, 4=Date, 3=Submitter,
+# 281=GoJet (tail key 'Tail Number'), 27=PSA ('Dropdown'),
+# 45=Envoy ('Tail Number'), 298=Mesa/IAH ('Tail Number', services under 'Services').
+# Mesa's per-row object also carries Gate/Start/Complete/Notes from the JotForm
+# configurable list; those are ignored by the reconciler.
 
 FLEET_FIELDS = [
-    ("GoJet", "281", "Tail Number"),
-    ("PSA",   "27",  "Dropdown"),
-    ("Envoy", "45",  "Tail Number"),
+    ("GoJet", "281", "Tail Number", "Service Performed"),
+    ("PSA",   "27",  "Dropdown",    "Service Performed"),
+    ("Envoy", "45",  "Tail Number", "Service Performed"),
+    ("Mesa",  "298", "Tail Number", "Services"),
 ]
 
 
@@ -189,12 +215,12 @@ def extract_closeout(body):
         date = None
 
     fleets = defaultdict(lambda: defaultdict(set))
-    for fleet, fid, tail_key in FLEET_FIELDS:
+    for fleet, fid, tail_key, svc_key in FLEET_FIELDS:
         for row in _parse_array(body.get(fid)):
             tail = (row.get(tail_key) or "").strip().upper()
             if not tail:
                 continue
-            fleets[fleet][tail] |= _canon_closeout_service(row.get("Service Performed"))
+            fleets[fleet][tail] |= _canon_closeout_service(row.get(svc_key))
     return {"location": loc, "date": date, "submitter": (body.get("3") or "").strip(),
             "fleets": {k: dict(v) for k, v in fleets.items()}}
 
@@ -297,7 +323,11 @@ def _open_debrief_workbook(fleet):
 
 
 def load_debrief_day(fleet, closeout_loc, date):
-    """Return {tail: set(canonical services)} for the given fleet/location/date."""
+    """Return {tail: set(canonical services)} for the given fleet/location/date.
+
+    PSA/Envoy/GoJet workbooks are laid out Date/Name/Location/Tail at cols 0-3.
+    The Mesa workbook has no Location column — its layout is Date/Name/Tail at
+    cols 0-2 — and every row is implicitly IAH, so no location filtering runs."""
     sheet = DEBRIEF_SHEETS[fleet]
     wb = _open_debrief_workbook(fleet)
     ws = wb[sheet]
@@ -306,17 +336,23 @@ def load_debrief_day(fleet, closeout_loc, date):
     svc_cols = {i: DEBRIEF_COL_MAP[h] for i, h in enumerate(header)
                 if h in DEBRIEF_COL_MAP}
 
+    has_location = (fleet != "Mesa")
+    tail_idx = 3 if has_location else 2
+
     result = defaultdict(set)
     for r in ws.iter_rows(min_row=2, values_only=True):
-        d, name, loc, tail = r[0], r[1], r[2], r[3]
+        d = r[0]
         if isinstance(d, datetime.datetime):
             d = d.date()
         if d != date:
             continue
-        if fleet == "Envoy" and str(loc).strip().upper() in ENVOY_IGNORE_LOCATIONS:
-            continue  # ignore DFW Envoy rows
-        if not _location_matches(loc, closeout_loc, fleet):
-            continue
+        if has_location:
+            loc = r[2]
+            if fleet == "Envoy" and str(loc).strip().upper() in ENVOY_IGNORE_LOCATIONS:
+                continue  # ignore DFW Envoy rows
+            if not _location_matches(loc, closeout_loc, fleet):
+                continue
+        tail = r[tail_idx]
         tail = (str(tail).strip().upper() if tail else "")
         if not tail:
             continue
