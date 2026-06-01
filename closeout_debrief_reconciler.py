@@ -100,6 +100,16 @@ EMAIL_TO   = [e.strip() for e in os.environ.get(
 CLAUDE_MODEL = "claude-opus-4-7"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
+# IAH dispatch email — a separate per-closeout email that mirrors the existing
+# nightly IAH dispatch David Blatt sends. Sent in addition to the reconciliation
+# email whenever location == IAH. All three values are overridable via env so the
+# sender/recipients can be rotated without code changes.
+IAH_DISPATCH_SENDER_NAME  = os.environ.get("IAH_DISPATCH_SENDER_NAME",  "David Blatt")
+IAH_DISPATCH_SENDER_EMAIL = os.environ.get("IAH_DISPATCH_SENDER_EMAIL", "david.blatt@foxtrotaviation.com")
+IAH_DISPATCH_RECIPIENTS   = [e.strip() for e in os.environ.get(
+    "IAH_DISPATCH_RECIPIENTS",
+    "samuel.kosco@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com").split(",") if e.strip()]
+
 # ----- SERVICE VOCABULARY NORMALIZATION --------------------------------------
 # Both systems get mapped to a single canonical code set so they can be compared.
 # Canonical codes: I, Ex, CC, DSC, CE, ED1, ED2, ED3, ED4, IHC, RON, LAV,
@@ -649,6 +659,133 @@ def build_clean_email(report):
             "to": EMAIL_TO, "from": EMAIL_FROM}
 
 
+# ----- IAH DISPATCH EMAIL ----------------------------------------------------
+# Mirrors the nightly dispatch David Blatt sends. Built directly from the raw
+# closeout body (fields 4, 298, 299) rather than from the reconcile report,
+# because the report drops Gate/Start/Complete/Notes from field 298 and never
+# sees field 299 at all. Sent in addition to the reconciliation email whenever
+# the closeout location is IAH.
+
+def _format_iah_time(raw):
+    """Convert a JotForm time string like '05:49 PM' to 24-hour 'H:MM'.
+    Returns the raw value verbatim if it can't be parsed."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M"):
+        try:
+            t = datetime.datetime.strptime(s, fmt)
+            return f"{t.hour}:{t.minute:02d}"
+        except ValueError:
+            continue
+    return s
+
+
+def _build_iah_services_table(rows_298):
+    """HTML table from field 298 rows. Services rendered as slash-delimited."""
+    import html as _html
+    th = ('style="background:#1F3864;color:#ffffff;font-weight:bold;'
+          'text-decoration:underline;padding:8px 12px;border:1px solid #000;'
+          'text-align:center;"')
+    td = ('style="padding:6px 12px;border:1px solid #000;text-align:center;"')
+    header = (f"<tr><th {th}>TAIL</th><th {th}>GATE</th><th {th}>SERVICES</th>"
+              f"<th {th}>START</th><th {th}>COMPLETE</th><th {th}>NOTES</th></tr>")
+
+    body_rows = []
+    for row in rows_298:
+        tail = str(row.get("Tail Number") or "").strip()
+        gate = str(row.get("Gate") or "").strip()
+        services_raw = str(row.get("Services") or "")
+        services = [s.strip() for s in services_raw.replace("\r", "").split("\n") if s.strip()]
+        services_str = "/".join(services)
+        start = _format_iah_time(row.get("Start"))
+        complete = _format_iah_time(row.get("Complete"))
+        notes = str(row.get("Notes") or "").strip()
+        body_rows.append(
+            f"<tr><td {td}>{_html.escape(tail)}</td>"
+            f"<td {td}>{_html.escape(gate)}</td>"
+            f"<td {td}>{_html.escape(services_str)}</td>"
+            f"<td {td}>{_html.escape(start)}</td>"
+            f"<td {td}>{_html.escape(complete)}</td>"
+            f"<td {td}>{_html.escape(notes)}</td></tr>"
+        )
+
+    return ('<table style="border-collapse:collapse;font-family:Arial,sans-serif;'
+            f'font-size:13px;margin:12px 0;">{header}{"".join(body_rows)}</table>')
+
+
+def _build_iah_observations_table(rows_299):
+    """HTML table from field 299 rows. Returns None if the list is empty."""
+    import html as _html
+    if not rows_299:
+        return None
+    th = ('style="background:#9BD18A;color:#000000;font-weight:bold;'
+          'text-decoration:underline;padding:8px 12px;border:1px solid #000;'
+          'text-align:center;"')
+    td = ('style="padding:6px 12px;border:1px solid #000;text-align:center;"')
+    tail_td = ('style="padding:6px 12px;border:1px solid #000;text-align:center;'
+               'width:120px;"')
+    header = (f'<tr><th {th} width="120">TAIL</th>'
+              f'<th {th}>OBSERVATIONS</th></tr>')
+
+    body_rows = []
+    for row in rows_299:
+        tail = str(row.get("Tail") or "").strip()
+        observation = str(row.get("Observation") or "").strip()
+        body_rows.append(
+            f"<tr><td {tail_td}>{_html.escape(tail)}</td>"
+            f"<td {td}>{_html.escape(observation)}</td></tr>"
+        )
+
+    return ('<table style="border-collapse:collapse;font-family:Arial,sans-serif;'
+            f'font-size:13px;margin:12px 0;">{header}{"".join(body_rows)}</table>')
+
+
+def build_iah_dispatch_email(body):
+    """Build the IAH per-closeout dispatch email from the raw JotForm body.
+    Reads fields 4 (date), 298 (Mesa fleet rows), 299 (observations)."""
+    import html as _html
+
+    date_raw = (body.get("4") or "").strip()
+    try:
+        date_obj = datetime.datetime.strptime(date_raw, "%Y-%m-%d").date()
+        date_str = date_obj.strftime("%B %d, %Y")
+        # Strip leading zero off day-of-month for a more natural rendering
+        date_str = date_str.replace(f" 0{date_obj.day}, ", f" {date_obj.day}, ")
+    except ValueError:
+        date_str = date_raw
+
+    rows_298 = _parse_array(body.get("298"))
+    rows_299 = _parse_array(body.get("299"))
+    aircraft_count = len(rows_298)
+
+    services_table = _build_iah_services_table(rows_298)
+    observations_table = _build_iah_observations_table(rows_299)
+    observations_block = observations_table if observations_table else (
+        '<p style="font-family:Arial,sans-serif;font-size:14px;">'
+        'No observations on Mesa-Air aircraft today.</p>'
+    )
+
+    subject = (f"IAH Dispatch Foxtrot Aviation Services: "
+               f"Mesa-Air Closeout {date_str}")
+
+    body_html = (
+        f'<div style="font-family:Arial,sans-serif;font-size:14px;">'
+        f'<p>Hello everyone,</p>'
+        f'<p>Please review the dispatch information for details regarding the '
+        f'completed services and observations from {_html.escape(date_str)}. '
+        f'The team successfully serviced {aircraft_count} Mesa-Air aircraft.</p>'
+        f'{services_table}'
+        f'{observations_block}'
+        f'<p>{_html.escape(IAH_DISPATCH_SENDER_NAME)}<br>'
+        f'Foxtrot Aviation Services</p>'
+        f'</div>'
+    )
+
+    return {"subject": subject, "body": body_html, "content_type": "HTML",
+            "to": IAH_DISPATCH_RECIPIENTS, "from": IAH_DISPATCH_SENDER_EMAIL}
+
+
 # ----- TEXT REPORT (no-API fallback / logging) -------------------------------
 
 def format_report(report):
@@ -722,15 +859,40 @@ def _load_payload():
     return data
 
 
+def _send_iah_dispatch(body):
+    """Build and send the IAH dispatch email. Logs the draft regardless of
+    whether sending succeeds. Honors SEND_EMAIL=false (draft only)."""
+    dispatch = build_iah_dispatch_email(body)
+    print("\n----- IAH DISPATCH EMAIL -----", flush=True)
+    print(f"To: {', '.join(dispatch['to'])}\nFrom: {dispatch['from']}\n"
+          f"Subject: {dispatch['subject']}\n", flush=True)
+    print(dispatch["body"], flush=True)
+    if os.environ.get("SEND_EMAIL", "true").lower() == "true":
+        send_email_via_graph(dispatch)
+        print("\n[IAH dispatch sent via Graph]", flush=True)
+    else:
+        print("\n[SEND_EMAIL=false — IAH dispatch draft only, not sent]", flush=True)
+
+
 def main():
     body = _load_payload()
+
+    # IAH-only: send the per-closeout dispatch email independently of
+    # reconciliation. Wrapped so a failure here never blocks reconciliation.
+    loc_base = (body.get("6") or "").strip().upper().split("-")[0]
+    if loc_base == "IAH":
+        try:
+            _send_iah_dispatch(body)
+        except Exception as e:  # noqa: BLE001
+            print(f"\n[IAH dispatch email failed: {e}]", flush=True)
+
     report = reconcile(body)
 
     # Always log a human-readable report to the Actions console.
     print(format_report(report), flush=True)
 
     if report.get("skipped"):
-        return  # location skipped (DFW/IAH/STL AD HOC) or unparseable — no email
+        return  # location skipped (DFW/STL AD HOC) or unparseable — no email
 
     send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
 
