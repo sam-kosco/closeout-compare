@@ -108,7 +108,7 @@ IAH_DISPATCH_SENDER_NAME  = os.environ.get("IAH_DISPATCH_SENDER_NAME",  "David B
 IAH_DISPATCH_SENDER_EMAIL = os.environ.get("IAH_DISPATCH_SENDER_EMAIL", "david.blatt@foxtrotaviation.com")
 IAH_DISPATCH_RECIPIENTS   = [e.strip() for e in os.environ.get(
     "IAH_DISPATCH_RECIPIENTS",
-    "samuel.kosco@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com").split(",") if e.strip()]
+    "samuel.kosco@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com,david.blatt@foxtrotaviation.com,renel.anthony@foxtrotaviation.com,heidi.cromer@foxtrotaviation.com,daniel.digiambattista@foxtrotaviation.com,anthony.pentz@foxtrotaviation.com,clara.lana@foxtrotaviation.com").split(",") if e.strip()]
 
 # ----- SERVICE VOCABULARY NORMALIZATION --------------------------------------
 # Both systems get mapped to a single canonical code set so they can be compared.
