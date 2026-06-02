@@ -104,8 +104,8 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # nightly IAH dispatch David Blatt sends. Sent in addition to the reconciliation
 # email whenever location == IAH. All three values are overridable via env so the
 # sender/recipients can be rotated without code changes.
-IAH_DISPATCH_SENDER_NAME  = os.environ.get("IAH_DISPATCH_SENDER_NAME",  "David Blatt")
-IAH_DISPATCH_SENDER_EMAIL = os.environ.get("IAH_DISPATCH_SENDER_EMAIL", "david.blatt@foxtrotaviation.com")
+IAH_DISPATCH_SENDER_NAME  = os.environ.get("IAH_DISPATCH_SENDER_NAME",  "Renel Anthony")
+IAH_DISPATCH_SENDER_EMAIL = os.environ.get("IAH_DISPATCH_SENDER_EMAIL", "renel.anthony@foxtrotaviation.com")
 IAH_DISPATCH_RECIPIENTS   = [e.strip() for e in os.environ.get(
     "IAH_DISPATCH_RECIPIENTS",
     "samuel.kosco@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com,david.blatt@foxtrotaviation.com,renel.anthony@foxtrotaviation.com,heidi.cromer@foxtrotaviation.com,daniel.digiambattista@foxtrotaviation.com,anthony.pentz@foxtrotaviation.com,clara.lana@foxtrotaviation.com").split(",") if e.strip()]
