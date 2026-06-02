@@ -741,10 +741,18 @@ def _build_iah_observations_table(rows_299):
             f'font-size:13px;margin:12px 0;">{header}{"".join(body_rows)}</table>')
 
 
-def build_iah_dispatch_email(body):
+def build_iah_dispatch_email(body, sender_name=None, sender_email=None):
     """Build the IAH per-closeout dispatch email from the raw JotForm body.
-    Reads fields 4 (date), 298 (Mesa fleet rows), 299 (observations)."""
+    Reads fields 4 (date), 298 (Mesa fleet rows), 299 (observations).
+
+    sender_name / sender_email override the module defaults so the dispatch can
+    be sent as the submitter (constructed from field 3) and fall back to the
+    configured defaults if that send fails. Both fall through to the
+    IAH_DISPATCH_* constants when omitted."""
     import html as _html
+
+    name = sender_name or IAH_DISPATCH_SENDER_NAME
+    email_from = sender_email or IAH_DISPATCH_SENDER_EMAIL
 
     date_raw = (body.get("4") or "").strip()
     try:
@@ -777,13 +785,14 @@ def build_iah_dispatch_email(body):
         f'The team successfully serviced {aircraft_count} Mesa-Air aircraft.</p>'
         f'{services_table}'
         f'{observations_block}'
-        f'<p>{_html.escape(IAH_DISPATCH_SENDER_NAME)}<br>'
+        f'<p>Thanks,</p>'
+        f'<p>{_html.escape(name)}<br>'
         f'Foxtrot Aviation Services</p>'
         f'</div>'
     )
 
     return {"subject": subject, "body": body_html, "content_type": "HTML",
-            "to": IAH_DISPATCH_RECIPIENTS, "from": IAH_DISPATCH_SENDER_EMAIL}
+            "to": IAH_DISPATCH_RECIPIENTS, "from": email_from}
 
 
 # ----- TEXT REPORT (no-API fallback / logging) -------------------------------
@@ -859,19 +868,68 @@ def _load_payload():
     return data
 
 
+def _construct_sender_from_submitter(submitter):
+    """Build a ('First Last', 'first.last@foxtrotaviation.com') pair from the
+    JotForm field 3 submitter name. Returns (None, None) if the name is empty
+    or doesn't yield any usable local-part tokens.
+
+    Splits on whitespace, lowercases, drops empties, and joins with '.'. So
+    'Sam Kosco' -> ('Sam Kosco', 'sam.kosco@foxtrotaviation.com'). Multi-word
+    names (middle names, suffixes) come through as 'first.middle.last@...';
+    if that bounces the dispatch falls back to the configured default."""
+    name = (submitter or "").strip()
+    parts = [p for p in name.lower().split() if p]
+    if not parts:
+        return None, None
+    return name, f"{'.'.join(parts)}@foxtrotaviation.com"
+
+
 def _send_iah_dispatch(body):
-    """Build and send the IAH dispatch email. Logs the draft regardless of
-    whether sending succeeds. Honors SEND_EMAIL=false (draft only)."""
-    dispatch = build_iah_dispatch_email(body)
-    print("\n----- IAH DISPATCH EMAIL -----", flush=True)
-    print(f"To: {', '.join(dispatch['to'])}\nFrom: {dispatch['from']}\n"
-          f"Subject: {dispatch['subject']}\n", flush=True)
-    print(dispatch["body"], flush=True)
-    if os.environ.get("SEND_EMAIL", "true").lower() == "true":
-        send_email_via_graph(dispatch)
-        print("\n[IAH dispatch sent via Graph]", flush=True)
-    else:
-        print("\n[SEND_EMAIL=false — IAH dispatch draft only, not sent]", flush=True)
+    """Build and send the IAH dispatch email. For IAH submissions, the sender
+    address and sign-off name are constructed from field 3 (submitter name).
+    If that send fails, the email is rebuilt and resent from the configured
+    IAH_DISPATCH_SENDER_EMAIL / IAH_DISPATCH_SENDER_NAME defaults so the
+    sign-off always matches the actual sender. Honors SEND_EMAIL=false."""
+    submitter = (body.get("3") or "").strip()
+    primary_name, primary_email = _construct_sender_from_submitter(submitter)
+
+    # Build the attempt list. Skip the primary if it would be identical to the
+    # default (e.g. submitter IS David Blatt) — no point trying the same address
+    # twice.
+    attempts = []
+    if primary_name and (primary_name, primary_email) != (
+            IAH_DISPATCH_SENDER_NAME, IAH_DISPATCH_SENDER_EMAIL):
+        attempts.append((primary_name, primary_email, "submitter"))
+    attempts.append((IAH_DISPATCH_SENDER_NAME, IAH_DISPATCH_SENDER_EMAIL, "default"))
+
+    send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
+
+    last_error = None
+    for i, (name, email_from, label) in enumerate(attempts):
+        dispatch = build_iah_dispatch_email(body, sender_name=name, sender_email=email_from)
+        print(f"\n----- IAH DISPATCH EMAIL ({label}) -----", flush=True)
+        print(f"To: {', '.join(dispatch['to'])}\nFrom: {dispatch['from']}\n"
+              f"Subject: {dispatch['subject']}\n", flush=True)
+        if i == 0:
+            print(dispatch["body"], flush=True)  # log full body only on first attempt
+
+        if not send_on:
+            print(f"\n[SEND_EMAIL=false — {label} draft only, not sent]", flush=True)
+            return
+
+        try:
+            send_email_via_graph(dispatch)
+            print(f"\n[IAH dispatch sent via Graph ({label}: {email_from})]", flush=True)
+            return
+        except Exception as e:  # noqa: BLE001 — retry as default on any send failure
+            last_error = e
+            print(f"\n[IAH dispatch send failed for {label} ({email_from}): {e}]",
+                  flush=True)
+            if i < len(attempts) - 1:
+                print(f"[Falling back to default sender ...]", flush=True)
+
+    # Both attempts exhausted — re-raise so the outer try/except in main() logs it.
+    raise RuntimeError(f"IAH dispatch failed for all senders; last error: {last_error}")
 
 
 def main():
