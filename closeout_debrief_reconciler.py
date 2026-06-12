@@ -87,7 +87,7 @@ GRAPH_FETCH_RETRIES = int(os.environ.get("GRAPH_FETCH_RETRIES", "3"))
 GRAPH_FETCH_DELAY_SEC = int(os.environ.get("GRAPH_FETCH_DELAY_SEC", "20"))
 
 DEBRIEF_SHEETS = {"GoJet": "Sheet1", "PSA": "Debriefs", "Envoy": "Envoy General",
-                  "Mesa": "Sheet1"}
+                  "Mesa": "Debriefs"}
 # Envoy DFW debriefs are explicitly ignored (separate 'DFW' sheet AND DFW rows
 # inside 'Envoy General' are both excluded).
 ENVOY_IGNORE_LOCATIONS = {"DFW"}
@@ -350,6 +350,8 @@ def load_debrief_day(fleet, closeout_loc, date):
     tail_idx = 3 if has_location else 2
 
     result = defaultdict(set)
+    row_counts = defaultdict(int)            # tail -> number of debrief rows today
+    occurrences = defaultdict(list)          # tail -> [sorted services] per row
     for r in ws.iter_rows(min_row=2, values_only=True):
         d = r[0]
         if isinstance(d, datetime.datetime):
@@ -366,12 +368,26 @@ def load_debrief_day(fleet, closeout_loc, date):
         tail = (str(tail).strip().upper() if tail else "")
         if not tail:
             continue
+        row_services = set()
         for i, code in svc_cols.items():
             val = r[i]
             if isinstance(val, str) and val.strip().lower().startswith("yes"):
-                result[tail].add(code)
+                row_services.add(code)
+        result[tail] |= row_services
+        row_counts[tail] += 1
+        occurrences[tail].append(sorted(row_services))
     wb.close()
-    return dict(result)
+
+    # A tail appearing on more than one debrief row for this date/location is a
+    # double submission. Services are still collapsed to a single set for
+    # reconciliation, but each duplicate is surfaced separately so it can be
+    # flagged in the email. occurrences carries the services from each submission
+    # so the note can show whether the duplicates are identical.
+    duplicates = [
+        {"tail": tail, "count": row_counts[tail], "occurrences": occurrences[tail]}
+        for tail in sorted(row_counts) if row_counts[tail] > 1
+    ]
+    return dict(result), duplicates
 
 
 # ----- TYPO DETECTION ---------------------------------------------------------
@@ -526,22 +542,30 @@ def reconcile(body):
 
     per_fleet = {}
     has_any = False
+    has_dupes = False
     for fleet, co_tails in fleets_present.items():
-        db_tails = load_debrief_day(fleet, loc, date)
+        db_tails, db_duplicates = load_debrief_day(fleet, loc, date)
         d = reconcile_fleet(fleet, co_tails, db_tails)
         per_fleet[fleet] = {
             "closeout_tail_count": len(co_tails),
             "debrief_tail_count": len(db_tails),
             "discrepancies": d,
+            # debrief tails submitted on more than one debrief today (double debriefs)
+            "duplicate_debriefs": db_duplicates,
             # tail -> sorted service codes, as serviced per the closeout
             "serviced": {t: sorted(s) for t, s in co_tails.items()},
         }
         if any(d.values()):
             has_any = True
+        if db_duplicates:
+            has_dupes = True
 
+    # has_duplicates is tracked separately from has_discrepancies so a run whose
+    # ONLY finding is a double debrief still routes to the clean-email path (with
+    # a flag) rather than the Claude discrepancy narrative.
     return {"skipped": False, "location": loc, "date": str(date),
             "submitter": co["submitter"], "fleets": per_fleet,
-            "has_discrepancies": has_any}
+            "has_discrepancies": has_any, "has_duplicates": has_dupes}
 
 
 # ----- EMAIL DRAFTING (Claude API) -------------------------------------------
@@ -574,6 +598,7 @@ Write a concise, professional email. Requirements:
     * Tails in the debrief but missing from the closeout.
     * Tails where the service lists differ (name the differing service codes on each side).
     * Probable typos: a closeout tail that does not match any debrief tail but is one character off from a debrief tail that is otherwise unmatched. Report these as an error, BUT explicitly note it is most likely a typo on the closeout, showing both the closeout-entered tail and the likely-correct debrief tail. If the matched services also differ, mention that too.
+    * Double debriefs: under each fleet's "duplicate_debriefs", any tail that was submitted on more than one debrief for this date. List each as a flagged discrepancy: name the tail, state how many debriefs it appeared on, and show the services recorded on each submission. Call out whether the duplicate submissions are identical or differ.
 - Keep it scannable (short lines / simple bullets). No filler and no closing pleasantries; end the body after the last item with no sign-off.
 - Do not invent any tails or services beyond what is in the JSON."""
 
@@ -650,10 +675,33 @@ def build_clean_email(report):
     table = (f'<table style="border-collapse:collapse;font-family:Arial,'
              f'sans-serif;font-size:13px;">{header}{body_rows}</table>')
 
+    # Double-debrief flag. This is the no-discrepancy path, so when a duplicate is
+    # present it is the only finding: mark the subject and append a bold note
+    # below the table describing each double submission.
+    dup_entries = [(fleet, dup)
+                   for fleet, info in report["fleets"].items()
+                   for dup in info.get("duplicate_debriefs", [])]
+    dup_note = ""
+    if dup_entries:
+        subject += " (Double Debrief Flagged)"
+        items = []
+        for fleet, dup in dup_entries:
+            occ = "; ".join("[" + ", ".join(o) + "]" if o else "[none]"
+                            for o in dup["occurrences"])
+            items.append(
+                f"<li>{html.escape(dup['tail'])} ({html.escape(fleet)}) — submitted on "
+                f"{dup['count']} debriefs for this date "
+                f"(services per submission: {html.escape(occ)})</li>")
+        dup_note = (
+            '<p style="font-weight:bold;color:#b00020;margin-top:16px;">'
+            'Double debrief flagged — the following tail(s) were submitted on more '
+            'than one debrief for this date:</p>'
+            f'<ul style="font-weight:bold;color:#b00020;">{"".join(items)}</ul>')
+
     body_html = (f'<div style="font-family:Arial,sans-serif;font-size:14px;">'
                  f'<p>{html.escape(intro)}</p>'
                  f'<p><b>Aircraft serviced ({len(rows)}):</b></p>'
-                 f'{table}</div>')
+                 f'{table}{dup_note}</div>')
 
     return {"subject": subject, "body": body_html, "content_type": "HTML",
             "to": EMAIL_TO, "from": EMAIL_FROM}
@@ -802,12 +850,13 @@ def format_report(report):
         return f"SKIPPED: {report['reason']} (location={report.get('location')}, date={report.get('date')})"
     lines = [f"Reconciliation — {report['location']} {report['date']} "
              f"(submitted by {report['submitter']})"]
-    if not report["has_discrepancies"]:
+    if not report["has_discrepancies"] and not report.get("has_duplicates"):
         lines.append("  No discrepancies. Closeout and debriefs are in agreement.")
         return "\n".join(lines)
     for fleet, info in report["fleets"].items():
         d = info["discrepancies"]
-        if not any(d.values()):
+        dups = info.get("duplicate_debriefs", [])
+        if not any(d.values()) and not dups:
             continue
         lines.append(f"\n  [{fleet}]  closeout tails={info['closeout_tail_count']}, "
                      f"debrief tails={info['debrief_tail_count']}")
@@ -829,6 +878,11 @@ def format_report(report):
             lines.append(f"    - {x['tail']}: service mismatch  "
                          f"closeout-only={x['on_closeout_only'] or '[]'}, "
                          f"debrief-only={x['on_debrief_only'] or '[]'}")
+        for x in dups:
+            occ = "; ".join("[" + ", ".join(o) + "]" if o else "[none]"
+                            for o in x["occurrences"])
+            lines.append(f"    - {x['tail']}: DOUBLE DEBRIEF — submitted on "
+                         f"{x['count']} debriefs (services per submission: {occ})")
     return "\n".join(lines)
 
 
