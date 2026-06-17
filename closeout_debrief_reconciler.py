@@ -110,6 +110,19 @@ IAH_DISPATCH_RECIPIENTS   = [e.strip() for e in os.environ.get(
     "IAH_DISPATCH_RECIPIENTS",
     "samuel.kosco@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com,david.blatt@foxtrotaviation.com,renel.anthony@foxtrotaviation.com,robert.murillo@foxtrotaviation.com,heidi.cromer@foxtrotaviation.com,daniel.digiambattista@foxtrotaviation.com,anthony.pentz@foxtrotaviation.com,clara.lana@foxtrotaviation.com,chris.stump@foxtrotaviation.com,nicholas.thomas@foxtrotaviation.com,jessica.clapper@foxtrotaviation.com,russell.dozier@mesa-air.com,shayla.ortiz@mesa-air.com,eric.nation@mesa-air.com,andy.jamison@united.com").split(",") if e.strip()]
 
+# IAH dispatch is once-per-day: the first IAH closeout for a given date (field 4)
+# sends the dispatch email; later closeouts for that same date are resubmissions
+# (edited values) and must NOT re-send the dispatch — but the reconciliation
+# ("comparison") email still runs on every submission. We remember which dates
+# already triggered a dispatch in a small JSON file on the DataHub drive, so the
+# memory survives across GitHub Actions runs. A bounded recent-date history (not
+# just the single latest date) keeps this correct even if submissions arrive out
+# of order or span multiple days.
+IAH_DISPATCH_STATE_PATH = os.environ.get(
+    "IAH_DISPATCH_STATE_PATH",
+    "Power Flows/Commercial Closeout/iah_dispatch_state.json")
+IAH_DISPATCH_STATE_KEEP = int(os.environ.get("IAH_DISPATCH_STATE_KEEP", "60"))
+
 # ----- SERVICE VOCABULARY NORMALIZATION --------------------------------------
 # Both systems get mapped to a single canonical code set so they can be compared.
 # Canonical codes: I, Ex, CC, DSC, CE, ED1, ED2, ED3, ED4, IHC, RON, LAV,
@@ -320,6 +333,46 @@ def _graph_download_workbook_bytes(sp_path):
                 time.sleep(GRAPH_FETCH_DELAY_SEC)
     raise RuntimeError(f"Failed to download '{sp_path}' after "
                        f"{GRAPH_FETCH_RETRIES} attempts: {last_err}")
+
+
+def _graph_get_json(sp_path):
+    """GET a small JSON file from the DataHub drive by path. Returns the parsed
+    object, or None if the file doesn't exist yet (404) or can't be read. State
+    reads are best-effort — a failure here must never block a dispatch."""
+    import requests
+
+    if not GRAPH_DRIVE_ID:
+        return None
+    encoded = "/".join(requests.utils.quote(seg) for seg in sp_path.split("/"))
+    url = (f"https://graph.microsoft.com/v1.0/drives/{GRAPH_DRIVE_ID}"
+           f"/root:/{encoded}:/content")
+    try:
+        resp = requests.get(url, headers={"Authorization": f"Bearer {_graph_token()}"},
+                            timeout=30)
+        if resp.status_code == 404:
+            return None  # no state yet — first run
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:  # noqa: BLE001 — best-effort; surface but don't raise
+        print(f"[state read failed ({sp_path}): {e}]", flush=True)
+        return None
+
+
+def _graph_put_json(sp_path, obj):
+    """PUT a small JSON file to the DataHub drive by path, creating or
+    overwriting it. Raises on failure so the caller can log it."""
+    import requests
+
+    if not GRAPH_DRIVE_ID:
+        raise RuntimeError("DRIVE_ID not set — cannot write state file")
+    encoded = "/".join(requests.utils.quote(seg) for seg in sp_path.split("/"))
+    url = (f"https://graph.microsoft.com/v1.0/drives/{GRAPH_DRIVE_ID}"
+           f"/root:/{encoded}:/content")
+    resp = requests.put(url, headers={
+        "Authorization": f"Bearer {_graph_token()}",
+        "Content-Type": "application/json",
+    }, data=json.dumps(obj).encode("utf-8"), timeout=30)
+    resp.raise_for_status()
 
 
 def _open_debrief_workbook(fleet):
@@ -938,12 +991,43 @@ def _construct_sender_from_submitter(submitter):
     return name, f"{'.'.join(parts)}@foxtrotaviation.com"
 
 
+def _iah_dispatch_already_sent(date):
+    """True if the IAH dispatch email has already been sent for this closeout
+    date (field 4) on a prior run — i.e. this submission is a resubmission for a
+    day we've already dispatched. Best-effort: if state can't be read we return
+    False so the dispatch still goes out (better a duplicate than a silent miss)."""
+    if not date:
+        return False
+    state = _graph_get_json(IAH_DISPATCH_STATE_PATH) or {}
+    return date in (state.get("dispatched_dates") or [])
+
+
+def _record_iah_dispatch(date):
+    """Remember that the IAH dispatch email was sent for this closeout date so
+    future resubmissions for the same day skip it. Keeps a bounded recent-date
+    history. Best-effort: a write failure is logged but doesn't fail the run."""
+    if not date:
+        return
+    state = _graph_get_json(IAH_DISPATCH_STATE_PATH) or {}
+    dates = [d for d in (state.get("dispatched_dates") or []) if d != date]
+    dates.append(date)  # most recent last
+    state["dispatched_dates"] = dates[-IAH_DISPATCH_STATE_KEEP:]
+    try:
+        _graph_put_json(IAH_DISPATCH_STATE_PATH, state)
+        print(f"\n[IAH dispatch date recorded: {date}]", flush=True)
+    except Exception as e:  # noqa: BLE001 — don't fail the run over state bookkeeping
+        print(f"\n[IAH dispatch state write failed for {date}: {e}]", flush=True)
+
+
 def _send_iah_dispatch(body):
     """Build and send the IAH dispatch email. For IAH submissions, the sender
     address and sign-off name are constructed from field 3 (submitter name).
     If that send fails, the email is rebuilt and resent from the configured
     IAH_DISPATCH_SENDER_EMAIL / IAH_DISPATCH_SENDER_NAME defaults so the
-    sign-off always matches the actual sender. Honors SEND_EMAIL=false."""
+    sign-off always matches the actual sender. Honors SEND_EMAIL=false.
+
+    Returns True if the email was actually sent via Graph, False if it was only
+    drafted (SEND_EMAIL=false). Raises if every sender attempt failed."""
     submitter = (body.get("3") or "").strip()
     primary_name, primary_email = _construct_sender_from_submitter(submitter)
 
@@ -969,12 +1053,12 @@ def _send_iah_dispatch(body):
 
         if not send_on:
             print(f"\n[SEND_EMAIL=false — {label} draft only, not sent]", flush=True)
-            return
+            return False
 
         try:
             send_email_via_graph(dispatch)
             print(f"\n[IAH dispatch sent via Graph ({label}: {email_from})]", flush=True)
-            return
+            return True
         except Exception as e:  # noqa: BLE001 — retry as default on any send failure
             last_error = e
             print(f"\n[IAH dispatch send failed for {label} ({email_from}): {e}]",
@@ -991,12 +1075,21 @@ def main():
 
     # IAH-only: send the per-closeout dispatch email independently of
     # reconciliation. Wrapped so a failure here never blocks reconciliation.
+    # The dispatch is once-per-day: if we already sent it for this closeout's
+    # date, this submission is a resubmission (edited values) — skip the dispatch
+    # but still run the comparison below.
     loc_base = (body.get("6") or "").strip().upper().split("-")[0]
     if loc_base == "IAH":
-        try:
-            _send_iah_dispatch(body)
-        except Exception as e:  # noqa: BLE001
-            print(f"\n[IAH dispatch email failed: {e}]", flush=True)
+        iah_date = (body.get("4") or "").strip()
+        if _iah_dispatch_already_sent(iah_date):
+            print(f"\n[IAH dispatch skipped — already sent for {iah_date} "
+                  f"(resubmission); comparison still runs]", flush=True)
+        else:
+            try:
+                if _send_iah_dispatch(body):
+                    _record_iah_dispatch(iah_date)
+            except Exception as e:  # noqa: BLE001
+                print(f"\n[IAH dispatch email failed: {e}]", flush=True)
 
     report = reconcile(body)
 
