@@ -123,6 +123,16 @@ IAH_DISPATCH_STATE_PATH = os.environ.get(
     "Power Flows/Commercial Closeout/iah_dispatch_state.json")
 IAH_DISPATCH_STATE_KEEP = int(os.environ.get("IAH_DISPATCH_STATE_KEEP", "60"))
 
+# Discrepancy records → Power Automate. For every discrepancy found during
+# reconciliation, a JSON packet is POSTed as its own HTTP request to a Power
+# Automate "When an HTTP request is received" flow, which appends a row to a
+# compliance Excel table so analysts can mark the outcome. This mirrors the
+# "PSA Tail Add" flow on the compliance tracker (one POST per item → one Add a
+# row). The trigger URL carries its own SAS-style signature; store it as a
+# GitHub secret / workflow env var rather than committing it. When unset,
+# posting is skipped but the records are still logged to the Actions console.
+DISCREPANCY_WEBHOOK_URL = os.environ.get("DISCREPANCY_WEBHOOK_URL", "")
+
 # ----- SERVICE VOCABULARY NORMALIZATION --------------------------------------
 # Both systems get mapped to a single canonical code set so they can be compared.
 # Canonical codes: I, Ex, CC, DSC, CE, ED1, ED2, ED3, ED4, IHC, RON, LAV,
@@ -896,6 +906,118 @@ def build_iah_dispatch_email(body, sender_name=None, sender_email=None):
             "to": IAH_DISPATCH_RECIPIENTS, "from": email_from}
 
 
+# ----- DISCREPANCY RECORDS (Power Automate webhook) --------------------------
+# For every discrepancy in the report, emit one flat record and POST it to a
+# Power Automate flow that appends a row to a compliance Excel table. Each
+# record carries Location, Tail Number, Date, Discrepancy, and Program. The
+# Discrepancy string is human-readable and self-explaining so an analyst can act
+# on it without opening the closeout:
+#   * "Missing from Debrief"  — on the closeout, no matching debrief tail
+#   * "Missing from Closeout" — in the debrief, no matching closeout tail
+#   * "Service Mismatch (...)"— matched tail, service lists differ
+#   * "Possible Typo (...)"   — closeout tail is one edit off an unmatched debrief tail
+#   * "Double Debrief"        — tail submitted on more than one debrief that day
+# ("Misdated" is a planned future value; it is not produced by the current
+# reconciliation logic.)
+
+# Field names match the JSON the Power Automate HTTP trigger expects (and, in
+# turn, the Excel table columns the flow writes).
+_DISC_LOCATION = "Location"
+_DISC_TAIL     = "Tail Number"
+_DISC_DATE     = "Date"
+_DISC_VALUE    = "Discrepancy"
+_DISC_PROGRAM  = "Program"
+
+
+def _fmt_service_delta(on_closeout_only, on_debrief_only):
+    """Render the two-sided service difference for a mismatch/typo, e.g.
+    'closeout-only: CC, DSC; debrief-only: CE'. Each side shows 'none' if empty."""
+    co = ", ".join(on_closeout_only) if on_closeout_only else "none"
+    db = ", ".join(on_debrief_only) if on_debrief_only else "none"
+    return f"closeout-only: {co}; debrief-only: {db}"
+
+
+def _disc_record(location, tail, date, discrepancy, program):
+    return {
+        _DISC_LOCATION: location,
+        _DISC_TAIL:     tail,
+        _DISC_DATE:     date,
+        _DISC_VALUE:    discrepancy,
+        _DISC_PROGRAM:  program,
+    }
+
+
+def build_discrepancy_records(report):
+    """Flatten a reconcile() report into a list of discrepancy records (one per
+    discrepancy). Returns [] for skipped runs or runs with no findings. Double
+    debriefs are included even on the clean-email path, since duplicate_debriefs
+    is populated independently of has_discrepancies."""
+    if report.get("skipped"):
+        return []
+    # Strip any '-Program' suffix so the table only ever sees the bare 3-letter
+    # airport code (e.g. 'SGF-Envoy' -> 'SGF', 'CVG' stays 'CVG').
+    location = report.get("location", "").strip().upper().split("-")[0]
+    date = report.get("date", "")
+    records = []
+    for fleet, info in report.get("fleets", {}).items():
+        d = info.get("discrepancies", {})
+        for x in d.get("missing_in_debrief", []):
+            records.append(_disc_record(location, x["tail"], date,
+                                        "Missing from Debrief", fleet))
+        for x in d.get("missing_in_closeout", []):
+            records.append(_disc_record(location, x["tail"], date,
+                                        "Missing from Closeout", fleet))
+        for x in d.get("service_mismatches", []):
+            disc = (f"Service Mismatch "
+                    f"({_fmt_service_delta(x['on_closeout_only'], x['on_debrief_only'])})")
+            records.append(_disc_record(location, x["tail"], date, disc, fleet))
+        for x in d.get("probable_typos", []):
+            # Report the closeout-entered (typo'd) tail; name the likely-correct one.
+            disc = (f"Possible Typo (entered '{x['closeout_tail']}', "
+                    f"likely '{x['debrief_tail']}')")
+            if x.get("service_match") is False:
+                disc += (f"; services also differ "
+                         f"({_fmt_service_delta(x.get('on_closeout_only', []), x.get('on_debrief_only', []))})")
+            records.append(_disc_record(location, x["closeout_tail"], date, disc, fleet))
+        for x in info.get("duplicate_debriefs", []):
+            records.append(_disc_record(location, x["tail"], date,
+                                        "Double Debrief", fleet))
+    return records
+
+
+def post_discrepancy_records(records):
+    """POST each discrepancy record to the Power Automate webhook as its own HTTP
+    request (one row per discrepancy, mirroring PSA Tail Add). Best-effort: a
+    failed POST is logged and the remaining records still go out. Returns the
+    count actually accepted by the flow."""
+    import requests
+
+    if not records:
+        return 0
+    if not DISCREPANCY_WEBHOOK_URL:
+        print("[DISCREPANCY_WEBHOOK_URL not set — discrepancy records not posted]",
+              flush=True)
+        return 0
+
+    sent = 0
+    for rec in records:
+        try:
+            resp = requests.post(
+                DISCREPANCY_WEBHOOK_URL,
+                headers={"Content-Type": "application/json"},
+                json=rec, timeout=30)
+            if resp.status_code not in (200, 201, 202):
+                print(f"[discrepancy POST failed ({resp.status_code}) for "
+                      f"{rec[_DISC_PROGRAM]} {rec[_DISC_TAIL]}: {resp.text[:200]}]",
+                      flush=True)
+                continue
+            sent += 1
+        except Exception as e:  # noqa: BLE001 — best-effort; keep posting the rest
+            print(f"[discrepancy POST error for {rec[_DISC_PROGRAM]} "
+                  f"{rec[_DISC_TAIL]}: {e}]", flush=True)
+    return sent
+
+
 # ----- TEXT REPORT (no-API fallback / logging) -------------------------------
 
 def format_report(report):
@@ -1118,6 +1240,23 @@ def main():
         print("\n[sent via Graph]", flush=True)
     else:
         print("\n[SEND_EMAIL=false — draft only, not sent]", flush=True)
+
+    # Discrepancy records → Power Automate (one POST per discrepancy → one Excel
+    # row). Built from the same report and runs on every non-skipped submission,
+    # including clean-email runs whose only finding is a double debrief. Honors
+    # SEND_EMAIL=false (draft-only: records are logged but not posted).
+    records = build_discrepancy_records(report)
+    if records:
+        print(f"\n----- DISCREPANCY RECORDS ({len(records)}) -----", flush=True)
+        for rec in records:
+            print(json.dumps(rec), flush=True)
+        if send_on:
+            sent = post_discrepancy_records(records)
+            print(f"\n[{sent}/{len(records)} discrepancy records posted to PA]",
+                  flush=True)
+        else:
+            print("\n[SEND_EMAIL=false — discrepancy records drafted only, not posted]",
+                  flush=True)
 
 
 if __name__ == "__main__":

@@ -41,4 +41,9 @@ jobs:
           # Pull debriefs from SharePoint via Graph (not local files)
           DEBRIEF_SOURCE: graph
           SEND_EMAIL: "true"
+          # Power Automate "When an HTTP request is received" flow that appends
+          # each discrepancy to the compliance Excel table. Stored as a secret
+          # because the URL carries its own SAS signature. If unset, discrepancy
+          # records are logged but not posted.
+          DISCREPANCY_WEBHOOK_URL: ${{ secrets.DISCREPANCY_WEBHOOK_URL }}
         run: python closeout_debrief_reconciler.py
