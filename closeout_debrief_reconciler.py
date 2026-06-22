@@ -86,7 +86,7 @@ GRAPH_DRIVE_ID = os.environ.get(
 GRAPH_FETCH_RETRIES = int(os.environ.get("GRAPH_FETCH_RETRIES", "3"))
 GRAPH_FETCH_DELAY_SEC = int(os.environ.get("GRAPH_FETCH_DELAY_SEC", "20"))
 
-DEBRIEF_SHEETS = {"GoJet": "Sheet1", "PSA": "Debriefs", "Envoy": "Envoy General",
+DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
                   "Mesa": "Debriefs"}
 # Envoy DFW debriefs are explicitly ignored (separate 'DFW' sheet AND DFW rows
 # inside 'Envoy General' are both excluded).
@@ -177,8 +177,14 @@ DEBRIEF_COL_MAP = {
     "Exterior Detail #2 (ED2)": "ED2",
     "Lav Tank Pressure Washing": "LAV",
     "Interior Heavy Clean (IHC)": "IHC",
-    "IHC": "IHC",
     "RON Clean (RON)": "RON",
+    # GoJet "Input" sheet uses bare service-code column headers (IHC, RON, ED1,
+    # ED2, CE) rather than the long parenthesized PSA/Envoy form.
+    "IHC": "IHC",
+    "RON": "RON",
+    "ED1": "ED1",
+    "ED2": "ED2",
+    "CE": "CE",
     # Mesa-specific columns
     "Exterior Clean (EC)": "EC",
     "Exterior Detail (ED)": "ED",
