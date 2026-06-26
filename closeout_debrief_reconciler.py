@@ -269,7 +269,7 @@ FLEET_FIELDS = [
 # Ultra has no service comparison (svc_keys=None -> TAIL_LEVEL_FLEETS).
 CMH_FLEET_FIELDS = [
     ("Envoy", "envoy", ("Tail Number", "Tail", "Dropdown"),
-     ("Service Performed", "Services")),
+     ("Service(s) Performed", "Service Performed", "Services")),
     ("Ultra", "ultra", ("Tail Number", "Tail", "Dropdown"), None),
 ]
 
