@@ -61,6 +61,7 @@ DEBRIEF_PATHS = {
     "PSA":   os.environ.get("PSA_DEBRIEF",    "/mnt/user-data/uploads/PSA_Debriefs.xlsx"),
     "Envoy": os.environ.get("ENVOY_DEBRIEF",  "/mnt/user-data/uploads/Envoy_Debriefs.xlsx"),
     "Mesa":  os.environ.get("MESA_DEBRIEF",   "/mnt/user-data/uploads/Mesa_Debriefs.xlsx"),
+    "Ultra": os.environ.get("ULTRA_DEBRIEF",  "/mnt/user-data/uploads/Ultra_Debriefs.xlsx"),
 }
 
 # SharePoint file paths (used when DEBRIEF_SOURCE == "graph"), relative to the
@@ -70,6 +71,7 @@ DEBRIEF_SP_PATHS = {
     "Envoy": "Power Flows/Debriefs/Envoy Debriefs.xlsx",
     "GoJet": "Power Flows/Debriefs/GoJet Debriefs.xlsx",
     "Mesa":  "Power Flows/Debriefs/Mesa Debriefs.xlsx",
+    "Ultra": "Power Flows/Debriefs/Ultra Debriefs.xlsx",
 }
 
 # Microsoft Graph / Entra credentials. Same Foxtrot Report Automation app used by
@@ -87,7 +89,28 @@ GRAPH_FETCH_RETRIES = int(os.environ.get("GRAPH_FETCH_RETRIES", "3"))
 GRAPH_FETCH_DELAY_SEC = int(os.environ.get("GRAPH_FETCH_DELAY_SEC", "20"))
 
 DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
-                  "Mesa": "Debriefs"}
+                  "Mesa": "Debriefs", "Ultra": "Input"}
+
+# Per-fleet column layout of each debrief sheet, by 0-based column index. Most
+# workbooks are Date/Name/Location/Tail at cols 0-3, but two diverge:
+#   * Mesa has NO Location column (every row is implicitly IAH): Date/Name/Tail.
+#   * Ultra ("Input" sheet) is Date/Tail/Name/Location — tail at col 1, location
+#     at col 3 — and has no service-code columns (Start/End/Items/Revenue only),
+#     so Ultra reconciles tail-level only (see TAIL_LEVEL_FLEETS).
+# location = None means the workbook has no Location column (no location filter).
+DEBRIEF_LAYOUT = {
+    "GoJet": {"date": 0, "location": 2,    "tail": 3},
+    "PSA":   {"date": 0, "location": 2,    "tail": 3},
+    "Envoy": {"date": 0, "location": 2,    "tail": 3},
+    "Mesa":  {"date": 0, "location": None, "tail": 2},
+    "Ultra": {"date": 0, "location": 3,    "tail": 1},
+}
+
+# Fleets reconciled at tail level only (services ignored) regardless of the
+# global TAIL_LEVEL_ONLY flag. Ultra's debrief sheet carries no service columns,
+# so there is nothing to compare service-by-service.
+TAIL_LEVEL_FLEETS = {"Ultra"}
+
 # Envoy DFW debriefs are explicitly ignored (separate 'DFW' sheet AND DFW rows
 # inside 'Envoy General' are both excluded).
 ENVOY_IGNORE_LOCATIONS = {"DFW"}
@@ -233,6 +256,38 @@ FLEET_FIELDS = [
     ("Mesa",  "298", "Tail Number", "Services"),
 ]
 
+# ----- CMH location-specific closeout -----------------------------------------
+# CMH is the first location with its OWN closeout form (event_type
+# "cmh_closeout_submitted"). Its payload is a named-key shape, NOT the numeric
+# field-id shape of the main closeout:
+#   {"tech": "<submitter>", "envoy": "<json array>", "ultra": "<json array>",
+#    "date": "MM/dd/yyyy"}
+# Location is always CMH (it is implied by the form). The envoy array maps to the
+# Envoy debrief workbook and the ultra array to the Ultra debrief workbook. Tail
+# and service keys are matched flexibly because the new form's configurable-list
+# widget may emit "Tail Number"/"Tail"/"Dropdown" and "Service Performed"/"Services".
+# Ultra has no service comparison (svc_keys=None -> TAIL_LEVEL_FLEETS).
+CMH_FLEET_FIELDS = [
+    ("Envoy", "envoy", ("Tail Number", "Tail", "Dropdown"),
+     ("Service Performed", "Services")),
+    ("Ultra", "ultra", ("Tail Number", "Tail", "Dropdown"), None),
+]
+
+
+def _is_cmh_payload(body):
+    """True if the body is a CMH-style named-key closeout rather than the main
+    numeric-field-id closeout."""
+    return any(k in body for k in ("envoy", "ultra"))
+
+
+def _first_present(row, keys):
+    """First non-empty value among `keys` in a closeout row dict, else None."""
+    for k in keys:
+        v = row.get(k)
+        if v not in (None, ""):
+            return v
+    return None
+
 
 def _parse_array(field):
     if not field or not str(field).strip():
@@ -243,9 +298,58 @@ def _parse_array(field):
         return []
 
 
+def _canon_tail(fleet, tail):
+    """Canonical tail string for matching, applied to BOTH the closeout and the
+    debrief sides so they compare on the same form.
+
+    GoJet is the exception: the closeout collects full N-numbers ('N524GJ')
+    while the GoJet debrief 'Input' sheet stores the bare aircraft number
+    ('524', sometimes as a numeric cell). Reduce GoJet tails to their numeric
+    core so the two sides match instead of every tail looking missing on both
+    sides. All other fleets use full tail numbers on both sides and are returned
+    stripped/upper-cased exactly as before."""
+    t = "" if tail is None else str(tail).strip().upper()
+    if fleet == "GoJet" and t:
+        m = re.search(r"\d+", t)
+        if m:
+            return m.group(0)
+    return t
+
+
+def _extract_cmh_closeout(body):
+    """Extract a CMH location-specific closeout (named-key payload). Location is
+    always CMH; date is MM/dd/yyyy; envoy/ultra arrays map to the Envoy/Ultra
+    fleets. Returns the same shape as extract_closeout."""
+    date_raw = (body.get("date") or "").strip()
+    date = None
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            date = datetime.datetime.strptime(date_raw, fmt).date()
+            break
+        except ValueError:
+            continue
+
+    fleets = defaultdict(lambda: defaultdict(set))
+    for fleet, key, tail_keys, svc_keys in CMH_FLEET_FIELDS:
+        for row in _parse_array(body.get(key)):
+            tail = _canon_tail(fleet, _first_present(row, tail_keys))
+            if not tail:
+                continue
+            if svc_keys:
+                fleets[fleet][tail] |= _canon_closeout_service(
+                    _first_present(row, svc_keys))
+            else:
+                fleets[fleet][tail]  # tail-level fleet: ensure key, empty services
+    return {"location": "CMH", "date": date,
+            "submitter": (body.get("tech") or "").strip(),
+            "fleets": {k: dict(v) for k, v in fleets.items()}}
+
+
 def extract_closeout(body):
     """Return dict: location, date(datetime.date), submitter, and
     fleets -> {tail: set(canonical services)}."""
+    if _is_cmh_payload(body):
+        return _extract_cmh_closeout(body)
     loc = (body.get("6") or "").strip()
     date_raw = (body.get("4") or "").strip()
     try:
@@ -256,7 +360,7 @@ def extract_closeout(body):
     fleets = defaultdict(lambda: defaultdict(set))
     for fleet, fid, tail_key, svc_key in FLEET_FIELDS:
         for row in _parse_array(body.get(fid)):
-            tail = (row.get(tail_key) or "").strip().upper()
+            tail = _canon_tail(fleet, row.get(tail_key))
             if not tail:
                 continue
             fleets[fleet][tail] |= _canon_closeout_service(row.get(svc_key))
@@ -404,9 +508,15 @@ def _open_debrief_workbook(fleet):
 def load_debrief_day(fleet, closeout_loc, date):
     """Return {tail: set(canonical services)} for the given fleet/location/date.
 
-    PSA/Envoy/GoJet workbooks are laid out Date/Name/Location/Tail at cols 0-3.
-    The Mesa workbook has no Location column — its layout is Date/Name/Tail at
-    cols 0-2 — and every row is implicitly IAH, so no location filtering runs."""
+    Column positions vary by workbook and are read from DEBRIEF_LAYOUT:
+    PSA/Envoy/GoJet are Date/Name/Location/Tail at cols 0-3; Mesa has no Location
+    column (Date/Name/Tail, every row implicitly IAH); Ultra is Date/Tail/Name/
+    Location with no service columns (tail-level only)."""
+    layout = DEBRIEF_LAYOUT[fleet]
+    date_idx = layout["date"]
+    loc_idx  = layout["location"]   # None -> workbook has no Location column
+    tail_idx = layout["tail"]
+
     sheet = DEBRIEF_SHEETS[fleet]
     wb = _open_debrief_workbook(fleet)
     ws = wb[sheet]
@@ -415,26 +525,22 @@ def load_debrief_day(fleet, closeout_loc, date):
     svc_cols = {i: DEBRIEF_COL_MAP[h] for i, h in enumerate(header)
                 if h in DEBRIEF_COL_MAP}
 
-    has_location = (fleet != "Mesa")
-    tail_idx = 3 if has_location else 2
-
     result = defaultdict(set)
     row_counts = defaultdict(int)            # tail -> number of debrief rows today
     occurrences = defaultdict(list)          # tail -> [sorted services] per row
     for r in ws.iter_rows(min_row=2, values_only=True):
-        d = r[0]
+        d = r[date_idx]
         if isinstance(d, datetime.datetime):
             d = d.date()
         if d != date:
             continue
-        if has_location:
-            loc = r[2]
+        if loc_idx is not None:
+            loc = r[loc_idx]
             if fleet == "Envoy" and str(loc).strip().upper() in ENVOY_IGNORE_LOCATIONS:
                 continue  # ignore DFW Envoy rows
             if not _location_matches(loc, closeout_loc, fleet):
                 continue
-        tail = r[tail_idx]
-        tail = (str(tail).strip().upper() if tail else "")
+        tail = _canon_tail(fleet, r[tail_idx])
         if not tail:
             continue
         row_services = set()
@@ -530,9 +636,12 @@ def _find_typo_pairs(co_only, db_only):
 
 # ----- RECONCILIATION ---------------------------------------------------------
 
-def reconcile_fleet(fleet, closeout_tails, debrief_tails):
+def reconcile_fleet(fleet, closeout_tails, debrief_tails, tail_level_only=None):
     """Compare one fleet's closeout tails vs debrief tails for the day.
-    Returns a dict of discrepancy lists."""
+    Returns a dict of discrepancy lists. When tail_level_only is True, service
+    mismatches are ignored (falls back to the global TAIL_LEVEL_ONLY if None)."""
+    if tail_level_only is None:
+        tail_level_only = TAIL_LEVEL_ONLY
     disc = {
         "missing_in_debrief": [],   # on closeout, not in debrief, no typo match
         "missing_in_closeout": [],  # in debrief, not on closeout, no typo match
@@ -563,7 +672,7 @@ def reconcile_fleet(fleet, closeout_tails, debrief_tails):
             "closeout_services": sorted(closeout_tails[co_tail]),
             "debrief_services": sorted(debrief_tails[db_tail]),
         }
-        if not TAIL_LEVEL_ONLY:
+        if not tail_level_only:
             co_svc, db_svc = closeout_tails[co_tail], debrief_tails[db_tail]
             entry["service_match"] = (co_svc == db_svc)
             entry["on_closeout_only"] = sorted(co_svc - db_svc)
@@ -571,7 +680,7 @@ def reconcile_fleet(fleet, closeout_tails, debrief_tails):
         disc["probable_typos"].append(entry)
 
     # Exact-match tails: compare services
-    if not TAIL_LEVEL_ONLY:
+    if not tail_level_only:
         for tail in sorted(co_set & db_set):
             co_svc, db_svc = closeout_tails[tail], debrief_tails[tail]
             if co_svc != db_svc:
@@ -614,7 +723,8 @@ def reconcile(body):
     has_dupes = False
     for fleet, co_tails in fleets_present.items():
         db_tails, db_duplicates = load_debrief_day(fleet, loc, date)
-        d = reconcile_fleet(fleet, co_tails, db_tails)
+        d = reconcile_fleet(fleet, co_tails, db_tails,
+                            tail_level_only=(TAIL_LEVEL_ONLY or fleet in TAIL_LEVEL_FLEETS))
         per_fleet[fleet] = {
             "closeout_tail_count": len(co_tails),
             "debrief_tail_count": len(db_tails),

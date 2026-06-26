@@ -5,7 +5,9 @@ name: Closeout Debrief Reconciliation
 # A manual trigger is also provided for testing with a pasted payload.
 on:
   repository_dispatch:
-    types: [closeout_submitted]
+    # closeout_submitted = main Commercial Closeout 2.0 (numeric field-id payload)
+    # cmh_closeout_submitted = CMH location-specific closeout (named-key payload)
+    types: [closeout_submitted, cmh_closeout_submitted]
   workflow_dispatch:
     inputs:
       payload:
