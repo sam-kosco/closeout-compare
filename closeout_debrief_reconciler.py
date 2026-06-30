@@ -95,8 +95,8 @@ DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
 # workbooks are Date/Name/Location/Tail at cols 0-3, but two diverge:
 #   * Mesa has NO Location column (every row is implicitly IAH): Date/Name/Tail.
 #   * Ultra ("Input" sheet) is Date/Tail/Name/Location — tail at col 1, location
-#     at col 3 — and has no service-code columns (Start/End/Items/Revenue only),
-#     so Ultra reconciles tail-level only (see TAIL_LEVEL_FLEETS).
+#     at col 3. Its service is a single value in the "Service" column (see
+#     DEBRIEF_VALUE_SERVICE), not a set of yes/no service-code columns.
 # location = None means the workbook has no Location column (no location filter).
 DEBRIEF_LAYOUT = {
     "GoJet": {"date": 0, "location": 2,    "tail": 3},
@@ -107,9 +107,9 @@ DEBRIEF_LAYOUT = {
 }
 
 # Fleets reconciled at tail level only (services ignored) regardless of the
-# global TAIL_LEVEL_ONLY flag. Ultra's debrief sheet carries no service columns,
-# so there is nothing to compare service-by-service.
-TAIL_LEVEL_FLEETS = {"Ultra"}
+# global TAIL_LEVEL_ONLY flag. Empty for now — Ultra used to be here, but it now
+# compares its value-service (see DEBRIEF_VALUE_SERVICE).
+TAIL_LEVEL_FLEETS = set()
 
 # Envoy DFW debriefs are explicitly ignored (separate 'DFW' sheet AND DFW rows
 # inside 'Envoy General' are both excluded).
@@ -242,6 +242,39 @@ def _canon_closeout_service(raw_service_string):
     return codes
 
 
+# Ultra is a "value-service" fleet: rather than a set of yes/no service columns,
+# a single value names the service performed ("Widebody Ultra" / "Narrowbody
+# Ultra"). The same value appears on the closeout (the ultra row's "Ultra" key)
+# and in the Ultra debrief's "Service" column, so both sides normalize through
+# _canon_ultra_service and compare directly. Unknown values are kept as-is
+# (whitespace-collapsed) so they still surface as a mismatch rather than vanish.
+ULTRA_SERVICE_MAP = {
+    "WIDEBODY ULTRA":   "Widebody Ultra",
+    "NARROWBODY ULTRA": "Narrowbody Ultra",
+    "WIDEBODY":         "Widebody Ultra",
+    "NARROWBODY":       "Narrowbody Ultra",
+}
+
+
+def _canon_ultra_service(raw):
+    """An Ultra service value (closeout 'Ultra' key or debrief 'Service' column)
+    -> a one-element set of the canonical label, or empty set if blank."""
+    s = " ".join(str(raw or "").split())  # trim + collapse internal whitespace
+    if not s:
+        return set()
+    return {ULTRA_SERVICE_MAP.get(s.upper(), s)}
+
+
+# "Value-service" fleets: a single debrief column whose VALUE names the service
+# performed, instead of one yes/no column per service code. Maps fleet -> (column
+# header, canonicalizer). The canonicalizer must match the one used on the
+# closeout side for that fleet so the two values compare. Ultra's "Service" column
+# holds "Widebody Ultra"/"Narrowbody Ultra".
+DEBRIEF_VALUE_SERVICE = {
+    "Ultra": ("Service", _canon_ultra_service),
+}
+
+
 # ----- CLOSEOUT EXTRACTION ----------------------------------------------------
 # Verified field map: 6=Location, 4=Date, 3=Submitter,
 # 281=GoJet (tail key 'Tail Number'), 27=PSA ('Dropdown'),
@@ -266,11 +299,17 @@ FLEET_FIELDS = [
 # Envoy debrief workbook and the ultra array to the Ultra debrief workbook. Tail
 # and service keys are matched flexibly because the new form's configurable-list
 # widget may emit "Tail Number"/"Tail"/"Dropdown" and "Service Performed"/"Services".
-# Ultra has no service comparison (svc_keys=None -> TAIL_LEVEL_FLEETS).
+# Each entry: (fleet, payload-key, tail-key candidates, service-key candidates,
+# service canonicalizer). Envoy uses the standard multi-code service string;
+# Ultra carries a single value-service under the "Ultra" key, normalized by
+# _canon_ultra_service and compared against the debrief's "Service" column.
 CMH_FLEET_FIELDS = [
     ("Envoy", "envoy", ("Tail Number", "Tail", "Dropdown"),
-     ("Service(s) Performed", "Service Performed", "Services")),
-    ("Ultra", "ultra", ("Tail Number", "Tail", "Dropdown"), None),
+     ("Service(s) Performed", "Service Performed", "Services"),
+     _canon_closeout_service),
+    ("Ultra", "ultra", ("Tail Number", "Tail", "Dropdown"),
+     ("Ultra", "Service(s) Performed", "Service Performed", "Services"),
+     _canon_ultra_service),
 ]
 
 
@@ -330,16 +369,12 @@ def _extract_cmh_closeout(body):
             continue
 
     fleets = defaultdict(lambda: defaultdict(set))
-    for fleet, key, tail_keys, svc_keys in CMH_FLEET_FIELDS:
+    for fleet, key, tail_keys, svc_keys, svc_canon in CMH_FLEET_FIELDS:
         for row in _parse_array(body.get(key)):
             tail = _canon_tail(fleet, _first_present(row, tail_keys))
             if not tail:
                 continue
-            if svc_keys:
-                fleets[fleet][tail] |= _canon_closeout_service(
-                    _first_present(row, svc_keys))
-            else:
-                fleets[fleet][tail]  # tail-level fleet: ensure key, empty services
+            fleets[fleet][tail] |= svc_canon(_first_present(row, svc_keys))
     return {"location": "CMH", "date": date,
             "submitter": (body.get("tech") or "").strip(),
             "fleets": {k: dict(v) for k, v in fleets.items()}}
@@ -511,7 +546,11 @@ def load_debrief_day(fleet, closeout_loc, date):
     Column positions vary by workbook and are read from DEBRIEF_LAYOUT:
     PSA/Envoy/GoJet are Date/Name/Location/Tail at cols 0-3; Mesa has no Location
     column (Date/Name/Tail, every row implicitly IAH); Ultra is Date/Tail/Name/
-    Location with no service columns (tail-level only)."""
+    Location with its service in a single "Service" value column.
+
+    Services are read one of two ways: most fleets have one yes/no column per
+    service code (DEBRIEF_COL_MAP); "value-service" fleets (DEBRIEF_VALUE_SERVICE,
+    e.g. Ultra) have a single column whose value names the service."""
     layout = DEBRIEF_LAYOUT[fleet]
     date_idx = layout["date"]
     loc_idx  = layout["location"]   # None -> workbook has no Location column
@@ -520,10 +559,18 @@ def load_debrief_day(fleet, closeout_loc, date):
     sheet = DEBRIEF_SHEETS[fleet]
     wb = _open_debrief_workbook(fleet)
     ws = wb[sheet]
-    header = next(ws.iter_rows(max_row=1, values_only=True))
-    # Map service columns by canonical code
-    svc_cols = {i: DEBRIEF_COL_MAP[h] for i, h in enumerate(header)
-                if h in DEBRIEF_COL_MAP}
+    header = list(next(ws.iter_rows(max_row=1, values_only=True)))
+
+    # Service reading: either a single value-column (value-service fleets) or the
+    # usual one-yes/no-column-per-code mapping.
+    value_service = DEBRIEF_VALUE_SERVICE.get(fleet)
+    if value_service:
+        vs_header, vs_canon = value_service
+        vs_idx = header.index(vs_header) if vs_header in header else None
+        svc_cols = {}
+    else:
+        svc_cols = {i: DEBRIEF_COL_MAP[h] for i, h in enumerate(header)
+                    if h in DEBRIEF_COL_MAP}
 
     result = defaultdict(set)
     row_counts = defaultdict(int)            # tail -> number of debrief rows today
@@ -543,11 +590,14 @@ def load_debrief_day(fleet, closeout_loc, date):
         tail = _canon_tail(fleet, r[tail_idx])
         if not tail:
             continue
-        row_services = set()
-        for i, code in svc_cols.items():
-            val = r[i]
-            if isinstance(val, str) and val.strip().lower().startswith("yes"):
-                row_services.add(code)
+        if value_service:
+            row_services = vs_canon(r[vs_idx]) if vs_idx is not None else set()
+        else:
+            row_services = set()
+            for i, code in svc_cols.items():
+                val = r[i]
+                if isinstance(val, str) and val.strip().lower().startswith("yes"):
+                    row_services.add(code)
         result[tail] |= row_services
         row_counts[tail] += 1
         occurrences[tail].append(sorted(row_services))
