@@ -289,21 +289,39 @@ FLEET_FIELDS = [
     ("Mesa",  "298", "Tail Number", "Services"),
 ]
 
-# ----- CMH location-specific closeout -----------------------------------------
-# CMH is the first location with its OWN closeout form (event_type
-# "cmh_closeout_submitted"). Its payload is a named-key shape, NOT the numeric
+# ----- Location-specific closeouts (named-key payloads) -----------------------
+# Some locations have their OWN closeout form instead of the single Commercial
+# Closeout 2.0. Their dispatch payload is a NAMED-KEY shape, not the numeric
 # field-id shape of the main closeout:
 #   {"tech": "<submitter>", "envoy": "<json array>", "ultra": "<json array>",
 #    "date": "MM/dd/yyyy"}
-# Location is always CMH (it is implied by the form). The envoy array maps to the
-# Envoy debrief workbook and the ultra array to the Ultra debrief workbook. Tail
-# and service keys are matched flexibly because the new form's configurable-list
-# widget may emit "Tail Number"/"Tail"/"Dropdown" and "Service Performed"/"Services".
-# Each entry: (fleet, payload-key, tail-key candidates, service-key candidates,
-# service canonicalizer). Envoy uses the standard multi-code service string;
-# Ultra carries a single value-service under the "Ultra" key, normalized by
-# _canon_ultra_service and compared against the debrief's "Service" column.
-CMH_FLEET_FIELDS = [
+# CMH was the first (event_type "cmh_closeout_submitted", Envoy + Ultra). XNA is
+# the second (event_type "xna_closeout_submitted", Envoy only — no ultra key).
+#
+# The payload itself does NOT name the location (there is no location field on
+# these forms), and CMH and XNA are indistinguishable by their keys (both carry
+# "envoy"). The location is therefore derived from the dispatch event_type, which
+# the workflow passes in via CLOSEOUT_EVENT_TYPE: "<loc>_closeout_submitted" ->
+# "<LOC>" (cmh -> CMH, xna -> XNA). A manual workflow_dispatch run has no action,
+# so an explicit "location" key in the body overrides, and the legacy default is
+# CMH so existing CMH behavior is unchanged if the env is ever unset.
+#
+# The envoy array maps to the Envoy debrief workbook and the ultra array (when
+# present) to the Ultra debrief workbook; a fleet whose array is absent/empty is
+# simply not reconciled (so XNA runs Envoy-only automatically). Tail and service
+# keys are matched flexibly because the form's configurable-list widget may emit
+# "Tail Number"/"Tail"/"Dropdown" and "Service(s) Performed"/"Service Performed"/
+# "Services". Each entry: (fleet, payload-key, tail-key candidates, service-key
+# candidates, service canonicalizer). Envoy uses the standard multi-code service
+# string; Ultra carries a single value-service under the "Ultra" key, normalized
+# by _canon_ultra_service and compared against the debrief's "Service" column.
+
+# Dispatch event_type (the repository_dispatch action), passed in by the workflow.
+# Used to derive the location for named-key closeouts. Empty for the main numeric
+# closeout and for manual workflow_dispatch runs.
+CLOSEOUT_EVENT_TYPE = os.environ.get("CLOSEOUT_EVENT_TYPE", "")
+
+NAMED_KEY_FLEET_FIELDS = [
     ("Envoy", "envoy", ("Tail Number", "Tail", "Dropdown"),
      ("Service(s) Performed", "Service Performed", "Services"),
      _canon_closeout_service),
@@ -313,10 +331,33 @@ CMH_FLEET_FIELDS = [
 ]
 
 
-def _is_cmh_payload(body):
-    """True if the body is a CMH-style named-key closeout rather than the main
-    numeric-field-id closeout."""
+def _is_named_key_payload(body):
+    """True if the body is a location-specific named-key closeout (CMH/XNA/...)
+    rather than the main numeric-field-id closeout."""
     return any(k in body for k in ("envoy", "ultra"))
+
+
+def _location_from_event_type(event_type):
+    """Derive the location code from a location-specific dispatch event_type,
+    e.g. 'xna_closeout_submitted' -> 'XNA'. Returns None for the main
+    'closeout_submitted' or anything not matching '<loc>_closeout_submitted'."""
+    et = (event_type or "").strip().lower()
+    suffix = "_closeout_submitted"
+    if not et.endswith(suffix):
+        return None
+    prefix = et[:-len(suffix)]
+    return prefix.upper() or None
+
+
+def _named_key_location(body):
+    """Location for a named-key closeout. Priority: an explicit 'location' key in
+    the body (manual testing / future forms), then the location derived from the
+    dispatch event_type, then the legacy default 'CMH' (so CMH still resolves
+    correctly even if CLOSEOUT_EVENT_TYPE is unset)."""
+    explicit = (body.get("location") or "").strip()
+    if explicit:
+        return explicit.upper()
+    return _location_from_event_type(CLOSEOUT_EVENT_TYPE) or "CMH"
 
 
 def _first_present(row, keys):
@@ -355,10 +396,12 @@ def _canon_tail(fleet, tail):
     return t
 
 
-def _extract_cmh_closeout(body):
-    """Extract a CMH location-specific closeout (named-key payload). Location is
-    always CMH; date is MM/dd/yyyy; envoy/ultra arrays map to the Envoy/Ultra
-    fleets. Returns the same shape as extract_closeout."""
+def _extract_named_key_closeout(body):
+    """Extract a location-specific closeout (named-key payload, CMH/XNA/...).
+    Location is derived from the dispatch event_type (see _named_key_location);
+    date is MM/dd/yyyy or YYYY-MM-DD; the envoy/ultra arrays map to the Envoy/
+    Ultra fleets (an absent array is simply skipped, so XNA runs Envoy-only).
+    Returns the same shape as extract_closeout."""
     date_raw = (body.get("date") or "").strip()
     date = None
     for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
@@ -369,13 +412,13 @@ def _extract_cmh_closeout(body):
             continue
 
     fleets = defaultdict(lambda: defaultdict(set))
-    for fleet, key, tail_keys, svc_keys, svc_canon in CMH_FLEET_FIELDS:
+    for fleet, key, tail_keys, svc_keys, svc_canon in NAMED_KEY_FLEET_FIELDS:
         for row in _parse_array(body.get(key)):
             tail = _canon_tail(fleet, _first_present(row, tail_keys))
             if not tail:
                 continue
             fleets[fleet][tail] |= svc_canon(_first_present(row, svc_keys))
-    return {"location": "CMH", "date": date,
+    return {"location": _named_key_location(body), "date": date,
             "submitter": (body.get("tech") or "").strip(),
             "fleets": {k: dict(v) for k, v in fleets.items()}}
 
@@ -383,8 +426,8 @@ def _extract_cmh_closeout(body):
 def extract_closeout(body):
     """Return dict: location, date(datetime.date), submitter, and
     fleets -> {tail: set(canonical services)}."""
-    if _is_cmh_payload(body):
-        return _extract_cmh_closeout(body)
+    if _is_named_key_payload(body):
+        return _extract_named_key_closeout(body)
     loc = (body.get("6") or "").strip()
     date_raw = (body.get("4") or "").strip()
     try:

@@ -7,7 +7,10 @@ on:
   repository_dispatch:
     # closeout_submitted = main Commercial Closeout 2.0 (numeric field-id payload)
     # cmh_closeout_submitted = CMH location-specific closeout (named-key payload)
-    types: [closeout_submitted, cmh_closeout_submitted]
+    # xna_closeout_submitted = XNA location-specific closeout (named-key payload,
+    #   Envoy only). Location for these named-key closeouts is derived from the
+    #   event type (see CLOSEOUT_EVENT_TYPE below), since the payload doesn't name it.
+    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted]
   workflow_dispatch:
     inputs:
       payload:
@@ -34,6 +37,12 @@ jobs:
         env:
           # Closeout payload — from repository_dispatch or the manual input.
           CLOSEOUT_PAYLOAD: ${{ toJSON(github.event.client_payload) != 'null' && toJSON(github.event.client_payload) || github.event.inputs.payload }}
+          # Which dispatch event fired. For location-specific named-key closeouts
+          # the reconciler derives the location from this (cmh_closeout_submitted
+          # -> CMH, xna_closeout_submitted -> XNA), because the payload itself
+          # doesn't carry a location field. Empty for manual workflow_dispatch runs
+          # (paste a "location" key into the test payload instead).
+          CLOSEOUT_EVENT_TYPE: ${{ github.event.action }}
           # Microsoft Graph / Entra (Foxtrot Report Automation app)
           TENANT_ID: ${{ secrets.TENANT_ID }}
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
