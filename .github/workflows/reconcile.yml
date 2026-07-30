@@ -10,9 +10,12 @@ on:
     # xna_closeout_submitted = XNA location-specific closeout (named-key payload,
     #   Envoy only). Location for these named-key closeouts is derived from the
     #   event type (see CLOSEOUT_EVENT_TYPE below), since the payload doesn't name it.
+    # sgf_/lit_closeout_submitted = SGF and LIT — identical to XNA (Envoy-only
+    #   named-key payload); location derived from the event type. No Python change
+    #   needed, since Envoy is already a registered fleet.
     # bdl_closeout_submitted = BDL location-specific closeout (named-key payload,
     #   Breeze fleet only; payload key "breeze").
-    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted, bdl_closeout_submitted]
+    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted, sgf_closeout_submitted, lit_closeout_submitted, bdl_closeout_submitted]
   workflow_dispatch:
     inputs:
       payload:
