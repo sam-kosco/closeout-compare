@@ -10,7 +10,9 @@ on:
     # xna_closeout_submitted = XNA location-specific closeout (named-key payload,
     #   Envoy only). Location for these named-key closeouts is derived from the
     #   event type (see CLOSEOUT_EVENT_TYPE below), since the payload doesn't name it.
-    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted]
+    # bdl_closeout_submitted = BDL location-specific closeout (named-key payload,
+    #   Breeze fleet only; payload key "breeze").
+    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted, bdl_closeout_submitted]
   workflow_dispatch:
     inputs:
       payload:

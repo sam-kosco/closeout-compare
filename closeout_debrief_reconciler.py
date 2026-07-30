@@ -62,6 +62,7 @@ DEBRIEF_PATHS = {
     "Envoy": os.environ.get("ENVOY_DEBRIEF",  "/mnt/user-data/uploads/Envoy_Debriefs.xlsx"),
     "Mesa":  os.environ.get("MESA_DEBRIEF",   "/mnt/user-data/uploads/Mesa_Debriefs.xlsx"),
     "Ultra": os.environ.get("ULTRA_DEBRIEF",  "/mnt/user-data/uploads/Ultra_Debriefs.xlsx"),
+    "Breeze": os.environ.get("BREEZE_DEBRIEF", "/mnt/user-data/uploads/Breeze_Debriefs.xlsx"),
 }
 
 # SharePoint file paths (used when DEBRIEF_SOURCE == "graph"), relative to the
@@ -72,6 +73,7 @@ DEBRIEF_SP_PATHS = {
     "GoJet": "Power Flows/Debriefs/GoJet Debriefs.xlsx",
     "Mesa":  "Power Flows/Debriefs/Mesa Debriefs.xlsx",
     "Ultra": "Power Flows/Debriefs/Ultra Debriefs.xlsx",
+    "Breeze": "Power Flows/Debriefs/Breeze Debriefs.xlsx",
 }
 
 # Microsoft Graph / Entra credentials. Same Foxtrot Report Automation app used by
@@ -89,7 +91,7 @@ GRAPH_FETCH_RETRIES = int(os.environ.get("GRAPH_FETCH_RETRIES", "3"))
 GRAPH_FETCH_DELAY_SEC = int(os.environ.get("GRAPH_FETCH_DELAY_SEC", "20"))
 
 DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
-                  "Mesa": "Debriefs", "Ultra": "Input"}
+                  "Mesa": "Debriefs", "Ultra": "Input", "Breeze": "Input"}
 
 # Per-fleet column layout of each debrief sheet, by 0-based column index. Most
 # workbooks are Date/Name/Location/Tail at cols 0-3, but two diverge:
@@ -97,6 +99,9 @@ DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
 #   * Ultra ("Input" sheet) is Date/Tail/Name/Location — tail at col 1, location
 #     at col 3. Its service is a single value in the "Service" column (see
 #     DEBRIEF_VALUE_SERVICE), not a set of yes/no service-code columns.
+#   * Breeze ("Input" sheet) is Date/Tail/Aircraft Type/Location/Name — tail at
+#     col 1, location at col 3 — then two 1/0 service columns "Breeze RON" and
+#     "Breeze Ultra" (numeric, see NUMERIC_SERVICE_FLEETS / DEBRIEF_COL_MAP).
 # location = None means the workbook has no Location column (no location filter).
 DEBRIEF_LAYOUT = {
     "GoJet": {"date": 0, "location": 2,    "tail": 3},
@@ -104,12 +109,27 @@ DEBRIEF_LAYOUT = {
     "Envoy": {"date": 0, "location": 2,    "tail": 3},
     "Mesa":  {"date": 0, "location": None, "tail": 2},
     "Ultra": {"date": 0, "location": 3,    "tail": 1},
+    "Breeze": {"date": 0, "location": 3,   "tail": 1},
 }
 
 # Fleets reconciled at tail level only (services ignored) regardless of the
 # global TAIL_LEVEL_ONLY flag. Empty for now — Ultra used to be here, but it now
 # compares its value-service (see DEBRIEF_VALUE_SERVICE).
 TAIL_LEVEL_FLEETS = set()
+
+# Fleets whose debrief service columns hold numeric 1/0 (or booleans) rather than
+# "Yes"/"No" strings. Breeze's "Breeze RON"/"Breeze Ultra" columns are 1 = the
+# service was performed, 0 = not. See _service_cell_on. Other fleets keep the
+# strict Yes-string reading (unaffected), so this can't silently flip an existing
+# fleet's service on from a stray number.
+NUMERIC_SERVICE_FLEETS = {"Breeze"}
+
+# Canonical closeout service codes that the debrief has no column for and so
+# cannot be verified. A matched tail whose closeout service is one of these is
+# reconciled at tail level (missing-tail checks still apply) but its services are
+# NOT compared, avoiding a guaranteed false "service mismatch". Breeze "Other" is
+# the first: the Breeze debrief only records "Breeze RON"/"Breeze Ultra".
+SERVICE_EXEMPT_CLOSEOUT_CODES = {"Other"}
 
 # Envoy DFW debriefs are explicitly ignored (separate 'DFW' sheet AND DFW rows
 # inside 'Envoy General' are both excluded).
@@ -214,6 +234,12 @@ DEBRIEF_COL_MAP = {
     "Fleet Campaign Decal (FCD)": "FCD",
     "Disinfection (ESS)": "ESS",
     "Detailed Flight Deck Clean (Flight Deck)": "Flight Deck",
+    # Breeze "Input" sheet: two numeric 1/0 service columns (see
+    # NUMERIC_SERVICE_FLEETS). Reconciled per-fleet, so reusing the "RON"
+    # canonical code (also used by PSA/Envoy/GoJet) is safe — Breeze only ever
+    # compares against the Breeze debrief.
+    "Breeze RON": "RON",
+    "Breeze Ultra": "Ultra",
 }
 
 
@@ -275,6 +301,30 @@ DEBRIEF_VALUE_SERVICE = {
 }
 
 
+# Breeze closeout carries a single "Service" value per aircraft: "RON", "Ultra",
+# or "Other". The debrief side encodes RON/Ultra as two 1/0 columns ("Breeze RON"
+# /"Breeze Ultra", canonical RON/Ultra), so those compare directly. "Other" has
+# no debrief column and is in SERVICE_EXEMPT_CLOSEOUT_CODES — a tail serviced as
+# "Other" is verified for presence but not service-compared. Unknown values are
+# kept as-is (whitespace-collapsed) so they surface rather than vanish. Breeze is
+# a normal multi-column debrief fleet (not a value-service fleet), so this maps
+# only the closeout side.
+BREEZE_SERVICE_MAP = {
+    "RON":   "RON",
+    "ULTRA": "Ultra",
+    "OTHER": "Other",
+}
+
+
+def _canon_breeze_service(raw):
+    """A Breeze closeout 'Service' value -> a one-element set of the canonical
+    label, or empty set if blank."""
+    s = " ".join(str(raw or "").split())
+    if not s:
+        return set()
+    return {BREEZE_SERVICE_MAP.get(s.upper(), s)}
+
+
 # ----- CLOSEOUT EXTRACTION ----------------------------------------------------
 # Verified field map: 6=Location, 4=Date, 3=Submitter,
 # 281=GoJet (tail key 'Tail Number'), 27=PSA ('Dropdown'),
@@ -328,13 +378,23 @@ NAMED_KEY_FLEET_FIELDS = [
     ("Ultra", "ultra", ("Tail Number", "Tail", "Dropdown"),
      ("Ultra", "Service(s) Performed", "Service Performed", "Services"),
      _canon_ultra_service),
+    # Breeze (BDL) — single "Service" value per aircraft (RON/Ultra/Other),
+    # canonicalized by _canon_breeze_service and compared against the Breeze
+    # debrief's "Breeze RON"/"Breeze Ultra" columns.
+    ("Breeze", "breeze", ("Tail Number", "Tail", "Dropdown"),
+     ("Service", "Service(s) Performed", "Service Performed", "Services"),
+     _canon_breeze_service),
 ]
+
+# Payload keys that mark a body as a named-key closeout. Derived from the fleet
+# table so adding a fleet above (a new payload key) is picked up automatically.
+_NAMED_KEY_PAYLOAD_KEYS = {key for _fleet, key, *_rest in NAMED_KEY_FLEET_FIELDS}
 
 
 def _is_named_key_payload(body):
-    """True if the body is a location-specific named-key closeout (CMH/XNA/...)
+    """True if the body is a location-specific named-key closeout (CMH/XNA/BDL/...)
     rather than the main numeric-field-id closeout."""
-    return any(k in body for k in ("envoy", "ultra"))
+    return any(k in body for k in _NAMED_KEY_PAYLOAD_KEYS)
 
 
 def _location_from_event_type(event_type):
@@ -583,6 +643,28 @@ def _open_debrief_workbook(fleet):
     return load_workbook(DEBRIEF_PATHS[fleet], read_only=True, data_only=True)
 
 
+def _service_cell_on(val, numeric_ok=False):
+    """True if a debrief service cell indicates the service was performed.
+
+    Always recognizes a "Yes..." string (the format PSA/Envoy/GoJet/Mesa use).
+    For numeric_ok fleets (NUMERIC_SERVICE_FLEETS, e.g. Breeze) it also treats a
+    nonzero number, a True boolean, or a '1'/'true' string as performed — those
+    workbooks store 1/0 rather than Yes/No. numeric handling is gated on
+    numeric_ok so a stray number in a Yes/No fleet's column can't flip a service
+    on and change existing behavior."""
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s.startswith("yes"):
+            return True
+        return bool(numeric_ok and s in ("1", "true"))
+    if numeric_ok:
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return val != 0
+    return False
+
+
 def load_debrief_day(fleet, closeout_loc, date):
     """Return {tail: set(canonical services)} for the given fleet/location/date.
 
@@ -605,8 +687,10 @@ def load_debrief_day(fleet, closeout_loc, date):
     header = list(next(ws.iter_rows(max_row=1, values_only=True)))
 
     # Service reading: either a single value-column (value-service fleets) or the
-    # usual one-yes/no-column-per-code mapping.
+    # usual one-column-per-code mapping. numeric_service fleets (e.g. Breeze) store
+    # 1/0 in those columns instead of "Yes"/"No" (see _service_cell_on).
     value_service = DEBRIEF_VALUE_SERVICE.get(fleet)
+    numeric_service = fleet in NUMERIC_SERVICE_FLEETS
     if value_service:
         vs_header, vs_canon = value_service
         vs_idx = header.index(vs_header) if vs_header in header else None
@@ -638,8 +722,7 @@ def load_debrief_day(fleet, closeout_loc, date):
         else:
             row_services = set()
             for i, code in svc_cols.items():
-                val = r[i]
-                if isinstance(val, str) and val.strip().lower().startswith("yes"):
+                if _service_cell_on(r[i], numeric_ok=numeric_service):
                     row_services.add(code)
         result[tail] |= row_services
         row_counts[tail] += 1
@@ -729,12 +812,21 @@ def _find_typo_pairs(co_only, db_only):
 
 # ----- RECONCILIATION ---------------------------------------------------------
 
-def reconcile_fleet(fleet, closeout_tails, debrief_tails, tail_level_only=None):
+def reconcile_fleet(fleet, closeout_tails, debrief_tails, tail_level_only=None,
+                    service_exempt_tails=None):
     """Compare one fleet's closeout tails vs debrief tails for the day.
     Returns a dict of discrepancy lists. When tail_level_only is True, service
-    mismatches are ignored (falls back to the global TAIL_LEVEL_ONLY if None)."""
+    mismatches are ignored (falls back to the global TAIL_LEVEL_ONLY if None).
+
+    service_exempt_tails is a set of closeout tails whose services must NOT be
+    compared even when tail_level_only is False (their closeout service has no
+    debrief equivalent — e.g. a Breeze "Other" row; see
+    SERVICE_EXEMPT_CLOSEOUT_CODES). Those tails still participate in the
+    missing/typo tail checks; only their service comparison is skipped."""
     if tail_level_only is None:
         tail_level_only = TAIL_LEVEL_ONLY
+    if service_exempt_tails is None:
+        service_exempt_tails = set()
     disc = {
         "missing_in_debrief": [],   # on closeout, not in debrief, no typo match
         "missing_in_closeout": [],  # in debrief, not on closeout, no typo match
@@ -765,16 +857,18 @@ def reconcile_fleet(fleet, closeout_tails, debrief_tails, tail_level_only=None):
             "closeout_services": sorted(closeout_tails[co_tail]),
             "debrief_services": sorted(debrief_tails[db_tail]),
         }
-        if not tail_level_only:
+        if not tail_level_only and co_tail not in service_exempt_tails:
             co_svc, db_svc = closeout_tails[co_tail], debrief_tails[db_tail]
             entry["service_match"] = (co_svc == db_svc)
             entry["on_closeout_only"] = sorted(co_svc - db_svc)
             entry["on_debrief_only"] = sorted(db_svc - co_svc)
         disc["probable_typos"].append(entry)
 
-    # Exact-match tails: compare services
+    # Exact-match tails: compare services (skipping service-exempt closeout tails)
     if not tail_level_only:
         for tail in sorted(co_set & db_set):
+            if tail in service_exempt_tails:
+                continue
             co_svc, db_svc = closeout_tails[tail], debrief_tails[tail]
             if co_svc != db_svc:
                 disc["service_mismatches"].append({
@@ -816,8 +910,13 @@ def reconcile(body):
     has_dupes = False
     for fleet, co_tails in fleets_present.items():
         db_tails, db_duplicates = load_debrief_day(fleet, loc, date)
+        # Tails whose closeout service can't be verified against the debrief
+        # (e.g. Breeze "Other") — reconciled for presence but not service.
+        exempt = {t for t, s in co_tails.items()
+                  if s & SERVICE_EXEMPT_CLOSEOUT_CODES}
         d = reconcile_fleet(fleet, co_tails, db_tails,
-                            tail_level_only=(TAIL_LEVEL_ONLY or fleet in TAIL_LEVEL_FLEETS))
+                            tail_level_only=(TAIL_LEVEL_ONLY or fleet in TAIL_LEVEL_FLEETS),
+                            service_exempt_tails=exempt)
         per_fleet[fleet] = {
             "closeout_tail_count": len(co_tails),
             "debrief_tail_count": len(db_tails),
