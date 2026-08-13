@@ -1078,6 +1078,74 @@ def build_clean_email(report):
             "to": EMAIL_TO, "from": EMAIL_FROM}
 
 
+def build_discrepancy_email_deterministic(report):
+    """Deterministic HTML discrepancy email (NO API). Fallback for when the Claude
+    drafting call in draft_discrepancy_email fails (e.g. API billing/credits or an
+    outage) so a discrepancy run still emails the findings — and still reaches the
+    PA records step in main() — instead of crashing the whole run.
+
+    Lists every finding per fleet from the same report the Claude prompt is given:
+    missing tails (both directions), service mismatches, probable typos, and double
+    debriefs. Mirrors the wording of the discrepancy records / format_report."""
+    import html
+
+    loc, date = report["location"], report["date"]
+    subject = f"Closeout/Debrief discrepancies — {loc} {date}"
+
+    h_style = "margin:16px 0 4px;font-size:14px;color:#1F3864;"
+    ul = 'style="margin:0;padding-left:20px;font-size:13px;"'
+
+    sections = []
+    for fleet, info in report.get("fleets", {}).items():
+        d = info.get("discrepancies", {})
+        dups = info.get("duplicate_debriefs", [])
+        if not any(d.values()) and not dups:
+            continue
+        items = []
+        for x in d.get("missing_in_debrief", []):
+            svc = ", ".join(x["closeout_services"]) or "none"
+            items.append(f"<li><b>{html.escape(x['tail'])}</b> — on the closeout, "
+                         f"missing from the debrief (closeout services: {html.escape(svc)})</li>")
+        for x in d.get("missing_in_closeout", []):
+            svc = ", ".join(x["debrief_services"]) or "none"
+            items.append(f"<li><b>{html.escape(x['tail'])}</b> — in the debrief, "
+                         f"missing from the closeout (debrief services: {html.escape(svc)})</li>")
+        for x in d.get("service_mismatches", []):
+            co = ", ".join(x["on_closeout_only"]) or "none"
+            db = ", ".join(x["on_debrief_only"]) or "none"
+            items.append(f"<li><b>{html.escape(x['tail'])}</b> — service mismatch "
+                         f"(closeout-only: {html.escape(co)}; debrief-only: {html.escape(db)})</li>")
+        for x in d.get("probable_typos", []):
+            note = (f"<li><b>{html.escape(x['closeout_tail'])}</b> — no debrief match; "
+                    f"<b>likely a closeout typo</b> of debrief tail "
+                    f"<b>{html.escape(x['debrief_tail'])}</b>")
+            if x.get("service_match") is False:
+                co = ", ".join(x.get("on_closeout_only", [])) or "none"
+                db = ", ".join(x.get("on_debrief_only", [])) or "none"
+                note += (f"; services also differ (closeout-only: {html.escape(co)}; "
+                         f"debrief-only: {html.escape(db)})")
+            items.append(note + "</li>")
+        for x in dups:
+            occ = "; ".join("[" + ", ".join(o) + "]" if o else "[none]"
+                            for o in x["occurrences"])
+            items.append(f"<li><b>{html.escape(x['tail'])}</b> — double debrief: submitted "
+                         f"on {x['count']} debriefs for this date "
+                         f"(services per submission: {html.escape(occ)})</li>")
+        sections.append(f'<div style="{h_style}"><b>{html.escape(fleet)}</b></div>'
+                        f'<ul {ul}>{"".join(items)}</ul>')
+
+    intro = (f"Discrepancies were found between the {html.escape(str(loc))} closeout and "
+             f"the program debrief tracker for {html.escape(str(date))}.")
+    footer = ('<p style="color:#888;font-size:11px;margin-top:16px;">'
+              'Automated summary — the discrepancy-narrative service was unavailable, '
+              'so this lists the findings directly.</p>')
+    body_html = (f'<div style="font-family:Arial,sans-serif;font-size:14px;">'
+                 f'<p>{intro}</p>{"".join(sections)}{footer}</div>')
+
+    return {"subject": subject, "body": body_html, "content_type": "HTML",
+            "to": EMAIL_TO, "from": EMAIL_FROM}
+
+
 # ----- IAH DISPATCH EMAIL ----------------------------------------------------
 # Mirrors the nightly dispatch David Blatt sends. Built directly from the raw
 # closeout body (fields 4, 298, 299) rather than from the reconcile report,
@@ -1532,7 +1600,19 @@ def main():
     send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
 
     if report.get("has_discrepancies"):
-        email = draft_discrepancy_email(report)   # Claude API
+        # The discrepancy narrative is drafted by the Claude API. If that call
+        # fails (API credits/billing, outage, transient 5xx), fall back to a
+        # deterministic HTML summary so the email — and the PA records step below —
+        # still go out. Previously an API failure raised here and killed the whole
+        # run, so a real discrepancy produced no email AND no PA records.
+        try:
+            email = draft_discrepancy_email(report)   # Claude API
+            if email is None:
+                raise RuntimeError("draft_discrepancy_email returned None")
+        except Exception as e:  # noqa: BLE001 — any API failure -> deterministic path
+            print(f"\n[discrepancy email via Claude API failed: {e}]\n"
+                  f"[falling back to deterministic discrepancy summary]", flush=True)
+            email = build_discrepancy_email_deterministic(report)
     else:
         email = build_clean_email(report)         # deterministic, no API
     if email is None:
