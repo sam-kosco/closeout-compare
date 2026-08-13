@@ -143,6 +143,15 @@ EMAIL_TO   = [e.strip() for e in os.environ.get(
 CLAUDE_MODEL = "claude-opus-4-7"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
+# Discrepancy emails are DETERMINISTIC by default (build_discrepancy_email_
+# deterministic) — no API cost and no external dependency on the critical path.
+# The reconciler already knows every discrepancy precisely, so drafting the email
+# needs no model judgment. Set USE_AI_DISCREPANCY_EMAIL=true to instead draft the
+# narrative via the Claude API (the deterministic builder still serves as the
+# fallback if that call fails). ANTHROPIC_API_KEY is only needed when this is on.
+USE_AI_DISCREPANCY_EMAIL = os.environ.get(
+    "USE_AI_DISCREPANCY_EMAIL", "false").lower() == "true"
+
 # IAH dispatch email — a separate per-closeout email that mirrors the existing
 # nightly IAH dispatch David Blatt sends. Sent in addition to the reconciliation
 # email whenever location == IAH. All three values are overridable via env so the
@@ -1600,19 +1609,21 @@ def main():
     send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
 
     if report.get("has_discrepancies"):
-        # The discrepancy narrative is drafted by the Claude API. If that call
-        # fails (API credits/billing, outage, transient 5xx), fall back to a
-        # deterministic HTML summary so the email — and the PA records step below —
-        # still go out. Previously an API failure raised here and killed the whole
-        # run, so a real discrepancy produced no email AND no PA records.
-        try:
-            email = draft_discrepancy_email(report)   # Claude API
-            if email is None:
-                raise RuntimeError("draft_discrepancy_email returned None")
-        except Exception as e:  # noqa: BLE001 — any API failure -> deterministic path
-            print(f"\n[discrepancy email via Claude API failed: {e}]\n"
-                  f"[falling back to deterministic discrepancy summary]", flush=True)
-            email = build_discrepancy_email_deterministic(report)
+        # Deterministic by default (no API). Only when USE_AI_DISCREPANCY_EMAIL is
+        # on do we draft the narrative via the Claude API — and even then, if that
+        # call fails (credits/billing, outage, transient 5xx) we fall back to the
+        # deterministic summary so the email + PA records step below still go out.
+        if USE_AI_DISCREPANCY_EMAIL:
+            try:
+                email = draft_discrepancy_email(report)   # Claude API (opt-in)
+                if email is None:
+                    raise RuntimeError("draft_discrepancy_email returned None")
+            except Exception as e:  # noqa: BLE001 — any API failure -> deterministic
+                print(f"\n[discrepancy email via Claude API failed: {e}]\n"
+                      f"[falling back to deterministic discrepancy summary]", flush=True)
+                email = build_discrepancy_email_deterministic(report)
+        else:
+            email = build_discrepancy_email_deterministic(report)  # default
     else:
         email = build_clean_email(report)         # deterministic, no API
     if email is None:

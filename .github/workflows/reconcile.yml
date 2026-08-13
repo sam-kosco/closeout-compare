@@ -52,7 +52,11 @@ jobs:
           TENANT_ID: ${{ secrets.TENANT_ID }}
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-          # Claude API for drafting the discrepancy email
+          # Discrepancy emails are deterministic by default (no API). The Claude
+          # narrative is opt-in: uncomment USE_AI_DISCREPANCY_EMAIL to enable it,
+          # in which case ANTHROPIC_API_KEY must be funded. Left off here so the
+          # pipeline uses no API credits and has no external dependency.
+          # USE_AI_DISCREPANCY_EMAIL: "true"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Pull debriefs from SharePoint via Graph (not local files)
           DEBRIEF_SOURCE: graph
