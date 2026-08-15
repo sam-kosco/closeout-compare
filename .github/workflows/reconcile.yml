@@ -15,7 +15,11 @@ on:
     #   needed, since Envoy is already a registered fleet.
     # bdl_closeout_submitted = BDL location-specific closeout (named-key payload,
     #   Breeze fleet only; payload key "breeze").
-    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted, sgf_closeout_submitted, lit_closeout_submitted, bdl_closeout_submitted]
+    # jsx_closeout_submitted = JSX closeout (named-key payload, JSX fleet; payload
+    #   key "jsx"). Unlike the others its payload carries an explicit "location"
+    #   key (JSX runs at many stations), which the reconciler uses over the event
+    #   type.
+    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted, sgf_closeout_submitted, lit_closeout_submitted, bdl_closeout_submitted, jsx_closeout_submitted]
   workflow_dispatch:
     inputs:
       payload:

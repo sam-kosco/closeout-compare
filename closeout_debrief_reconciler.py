@@ -63,6 +63,7 @@ DEBRIEF_PATHS = {
     "Mesa":  os.environ.get("MESA_DEBRIEF",   "/mnt/user-data/uploads/Mesa_Debriefs.xlsx"),
     "Ultra": os.environ.get("ULTRA_DEBRIEF",  "/mnt/user-data/uploads/Ultra_Debriefs.xlsx"),
     "Breeze": os.environ.get("BREEZE_DEBRIEF", "/mnt/user-data/uploads/Breeze_Debriefs.xlsx"),
+    "JSX":   os.environ.get("JSX_DEBRIEF",    "/mnt/user-data/uploads/JSX_Debriefs.xlsx"),
 }
 
 # SharePoint file paths (used when DEBRIEF_SOURCE == "graph"), relative to the
@@ -74,6 +75,7 @@ DEBRIEF_SP_PATHS = {
     "Mesa":  "Power Flows/Debriefs/Mesa Debriefs.xlsx",
     "Ultra": "Power Flows/Debriefs/Ultra Debriefs.xlsx",
     "Breeze": "Power Flows/Debriefs/Breeze Debriefs.xlsx",
+    "JSX":   "Power Flows/Debriefs/JSX Debriefs.xlsx",
 }
 
 # Microsoft Graph / Entra credentials. Same Foxtrot Report Automation app used by
@@ -91,7 +93,8 @@ GRAPH_FETCH_RETRIES = int(os.environ.get("GRAPH_FETCH_RETRIES", "3"))
 GRAPH_FETCH_DELAY_SEC = int(os.environ.get("GRAPH_FETCH_DELAY_SEC", "20"))
 
 DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
-                  "Mesa": "Debriefs", "Ultra": "Input", "Breeze": "Input"}
+                  "Mesa": "Debriefs", "Ultra": "Input", "Breeze": "Input",
+                  "JSX": "Sheet1"}
 
 # Per-fleet column layout of each debrief sheet, by 0-based column index. Most
 # workbooks are Date/Name/Location/Tail at cols 0-3, but two diverge:
@@ -102,6 +105,9 @@ DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
 #   * Breeze ("Input" sheet) is Date/Tail/Aircraft Type/Location/Name — tail at
 #     col 1, location at col 3 — then two 1/0 service columns "Breeze RON" and
 #     "Breeze Ultra" (numeric, see NUMERIC_SERVICE_FLEETS / DEBRIEF_COL_MAP).
+#   * JSX ("Sheet1") is Tail/Plane Type/Service Location/Date/Technician — tail at
+#     col 0, location at col 2, DATE AT COL 3 (not 0) — then five 1/0 service
+#     columns RON/Interior Detail/Exterior Detail/Carpet Extraction/Biohazard.
 # location = None means the workbook has no Location column (no location filter).
 DEBRIEF_LAYOUT = {
     "GoJet": {"date": 0, "location": 2,    "tail": 3},
@@ -110,6 +116,7 @@ DEBRIEF_LAYOUT = {
     "Mesa":  {"date": 0, "location": None, "tail": 2},
     "Ultra": {"date": 0, "location": 3,    "tail": 1},
     "Breeze": {"date": 0, "location": 3,   "tail": 1},
+    "JSX":   {"date": 3, "location": 2,    "tail": 0},
 }
 
 # Fleets reconciled at tail level only (services ignored) regardless of the
@@ -118,11 +125,12 @@ DEBRIEF_LAYOUT = {
 TAIL_LEVEL_FLEETS = set()
 
 # Fleets whose debrief service columns hold numeric 1/0 (or booleans) rather than
-# "Yes"/"No" strings. Breeze's "Breeze RON"/"Breeze Ultra" columns are 1 = the
-# service was performed, 0 = not. See _service_cell_on. Other fleets keep the
-# strict Yes-string reading (unaffected), so this can't silently flip an existing
-# fleet's service on from a stray number.
-NUMERIC_SERVICE_FLEETS = {"Breeze"}
+# "Yes"/"No" strings. Breeze ("Breeze RON"/"Breeze Ultra") and JSX (RON/Interior
+# Detail/Exterior Detail/Carpet Extraction/Biohazard) both use 1 = performed,
+# 0 = not. See _service_cell_on. Other fleets keep the strict Yes-string reading
+# (unaffected), so this can't silently flip an existing fleet's service on from a
+# stray number.
+NUMERIC_SERVICE_FLEETS = {"Breeze", "JSX"}
 
 # Canonical closeout service codes that the debrief has no column for and so
 # cannot be verified. A matched tail whose closeout service is one of these is
@@ -249,6 +257,14 @@ DEBRIEF_COL_MAP = {
     # compares against the Breeze debrief.
     "Breeze RON": "RON",
     "Breeze Ultra": "Ultra",
+    # JSX "Sheet1": five numeric 1/0 service columns (see NUMERIC_SERVICE_FLEETS).
+    # "RON" reuses the shared canonical code above; the other four use full-label
+    # canonical codes that match _canon_jsx_service on the closeout side. Per-fleet,
+    # so no cross-fleet collision.
+    "Interior Detail": "Interior Detail",
+    "Exterior Detail": "Exterior Detail",
+    "Carpet Extraction": "Carpet Extraction",
+    "Biohazard": "Biohazard",
 }
 
 
@@ -334,6 +350,37 @@ def _canon_breeze_service(raw):
     return {BREEZE_SERVICE_MAP.get(s.upper(), s)}
 
 
+# JSX closeout 'Service(s) Performed' is a \n-delimited multi-service string of
+# full-text names ("RON Cleaning", "Interior Detail", "Exterior Detail", "Carpet
+# Extraction", "Biohazard"). These map to the five JSX debrief 1/0 columns
+# (RON/Interior Detail/Exterior Detail/Carpet Extraction/Biohazard, canonicalized
+# via DEBRIEF_COL_MAP). Only "RON Cleaning" differs in wording from its column
+# ("RON"); the rest match their column header verbatim. Unknown values are kept
+# as-is (whitespace-collapsed) so they surface as a mismatch rather than vanish.
+JSX_SERVICE_MAP = {
+    "RON CLEANING":      "RON",
+    "RON":               "RON",
+    "INTERIOR DETAIL":   "Interior Detail",
+    "EXTERIOR DETAIL":   "Exterior Detail",
+    "CARPET EXTRACTION": "Carpet Extraction",
+    "BIOHAZARD":         "Biohazard",
+}
+
+
+def _canon_jsx_service(raw):
+    """A JSX closeout 'Service(s) Performed' value -> set of canonical codes.
+    Splits the \\n-delimited multi-service string and maps each full-text name."""
+    codes = set()
+    if not raw:
+        return codes
+    for line in str(raw).replace("\r", "").split("\n"):
+        s = " ".join(line.split())  # trim + collapse internal whitespace
+        if not s:
+            continue
+        codes.add(JSX_SERVICE_MAP.get(s.upper(), s))
+    return codes
+
+
 # ----- CLOSEOUT EXTRACTION ----------------------------------------------------
 # Verified field map: 6=Location, 4=Date, 3=Submitter,
 # 281=GoJet (tail key 'Tail Number'), 27=PSA ('Dropdown'),
@@ -393,6 +440,14 @@ NAMED_KEY_FLEET_FIELDS = [
     ("Breeze", "breeze", ("Tail Number", "Tail", "Dropdown"),
      ("Service", "Service(s) Performed", "Service Performed", "Services"),
      _canon_breeze_service),
+    # JSX — \n-delimited multi-service full-text string ("RON Cleaning",
+    # "Interior Detail", …) canonicalized by _canon_jsx_service and compared
+    # against the JSX debrief's five 1/0 service columns. Location comes from the
+    # payload's own "location" key (JSX runs at many stations), which
+    # _named_key_location prefers over the event-type-derived location.
+    ("JSX", "jsx", ("Tail Number", "Tail", "Dropdown"),
+     ("Service(s) Performed", "Service Performed", "Services", "Service"),
+     _canon_jsx_service),
 ]
 
 # Payload keys that mark a body as a named-key closeout. Derived from the fleet
