@@ -1200,11 +1200,8 @@ def build_discrepancy_email_deterministic(report):
 
     intro = (f"Discrepancies were found between the {html.escape(str(loc))} closeout and "
              f"the program debrief tracker for {html.escape(str(date))}.")
-    footer = ('<p style="color:#888;font-size:11px;margin-top:16px;">'
-              'Automated summary — the discrepancy-narrative service was unavailable, '
-              'so this lists the findings directly.</p>')
     body_html = (f'<div style="font-family:Arial,sans-serif;font-size:14px;">'
-                 f'<p>{intro}</p>{"".join(sections)}{footer}</div>')
+                 f'<p>{intro}</p>{"".join(sections)}</div>')
 
     return {"subject": subject, "body": body_html, "content_type": "HTML",
             "to": EMAIL_TO, "from": EMAIL_FROM}
