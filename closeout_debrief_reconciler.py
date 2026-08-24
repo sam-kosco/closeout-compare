@@ -64,6 +64,11 @@ DEBRIEF_PATHS = {
     "Ultra": os.environ.get("ULTRA_DEBRIEF",  "/mnt/user-data/uploads/Ultra_Debriefs.xlsx"),
     "Breeze": os.environ.get("BREEZE_DEBRIEF", "/mnt/user-data/uploads/Breeze_Debriefs.xlsx"),
     "JSX":   os.environ.get("JSX_DEBRIEF",    "/mnt/user-data/uploads/JSX_Debriefs.xlsx"),
+    # DFW Envoy + Regional share the Envoy workbook's "DFW" sheet (see
+    # DEBRIEF_ROW_FILTER); Frontier is its own workbook.
+    "DFW_Envoy":    os.environ.get("ENVOY_DEBRIEF", "/mnt/user-data/uploads/Envoy_Debriefs.xlsx"),
+    "DFW_Regional": os.environ.get("ENVOY_DEBRIEF", "/mnt/user-data/uploads/Envoy_Debriefs.xlsx"),
+    "Frontier": os.environ.get("FRONTIER_DEBRIEF", "/mnt/user-data/uploads/Frontier_Debriefs.xlsx"),
 }
 
 # SharePoint file paths (used when DEBRIEF_SOURCE == "graph"), relative to the
@@ -76,6 +81,9 @@ DEBRIEF_SP_PATHS = {
     "Ultra": "Power Flows/Debriefs/Ultra Debriefs.xlsx",
     "Breeze": "Power Flows/Debriefs/Breeze Debriefs.xlsx",
     "JSX":   "Power Flows/Debriefs/JSX Debriefs.xlsx",
+    "DFW_Envoy":    "Power Flows/Debriefs/Envoy Debriefs.xlsx",
+    "DFW_Regional": "Power Flows/Debriefs/Envoy Debriefs.xlsx",
+    "Frontier": "Power Flows/Debriefs/Frontier Debriefs.xlsx",
 }
 
 # Microsoft Graph / Entra credentials. Same Foxtrot Report Automation app used by
@@ -94,7 +102,8 @@ GRAPH_FETCH_DELAY_SEC = int(os.environ.get("GRAPH_FETCH_DELAY_SEC", "20"))
 
 DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
                   "Mesa": "Debriefs", "Ultra": "Input", "Breeze": "Input",
-                  "JSX": "Sheet1"}
+                  "JSX": "Sheet1",
+                  "DFW_Envoy": "DFW", "DFW_Regional": "DFW", "Frontier": "Sheet2"}
 
 # Per-fleet column layout of each debrief sheet, by 0-based column index. Most
 # workbooks are Date/Name/Location/Tail at cols 0-3, but two diverge:
@@ -108,6 +117,13 @@ DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
 #   * JSX ("Sheet1") is Tail/Plane Type/Service Location/Date/Technician — tail at
 #     col 0, location at col 2, DATE AT COL 3 (not 0) — then five 1/0 service
 #     columns RON/Interior Detail/Exterior Detail/Carpet Extraction/Biohazard.
+#   * DFW_Envoy / DFW_Regional share the Envoy workbook "DFW" sheet: Date/Name/
+#     Tail/Envoy Aircraft/Regional Carrier/IHC/RRON/ED1/ED2 — tail at col 2, NO
+#     location column (every row is DFW). The two fleets are split by a row filter
+#     on the Envoy Aircraft / Regional Carrier columns (see DEBRIEF_ROW_FILTER).
+#   * Frontier ("Sheet2") is Date/Name/Location/Tail Number/Aircraft Type and
+#     Service — tail at col 3, location at col 2; service is the single value in
+#     the "Aircraft Type and Service" column (see DEBRIEF_VALUE_SERVICE).
 # location = None means the workbook has no Location column (no location filter).
 DEBRIEF_LAYOUT = {
     "GoJet": {"date": 0, "location": 2,    "tail": 3},
@@ -117,6 +133,35 @@ DEBRIEF_LAYOUT = {
     "Ultra": {"date": 0, "location": 3,    "tail": 1},
     "Breeze": {"date": 0, "location": 3,   "tail": 1},
     "JSX":   {"date": 3, "location": 2,    "tail": 0},
+    "DFW_Envoy":    {"date": 0, "location": None, "tail": 2},
+    "DFW_Regional": {"date": 0, "location": None, "tail": 2},
+    "Frontier":     {"date": 0, "location": 2,    "tail": 3},
+}
+
+# Some debrief fleets share a sheet and are told apart by a COLUMN VALUE, not by
+# the location column. Maps debrief-fleet -> (column header, predicate); only rows
+# where predicate(cell) is True are kept. Envoy vs Regional both live in the DFW
+# sheet: an Envoy-mainline row has "Envoy Aircraft" = Yes; a regional row names a
+# carrier ("Skywest"/"PSA"/…) in "Regional Carrier".
+def _is_regional_carrier(v):
+    """True if a 'Regional Carrier' cell names an actual carrier (not blank/N/A/
+    0/No/False)."""
+    s = str(v or "").strip().lower()
+    return s not in ("", "n/a", "0", "none", "no", "false")
+
+DEBRIEF_ROW_FILTER = {
+    "DFW_Envoy":    ("Envoy Aircraft", lambda v: str(v or "").strip().lower().startswith("yes")),
+    "DFW_Regional": ("Regional Carrier", _is_regional_carrier),
+}
+
+# Some fleets read a DIFFERENT debrief sheet at particular locations. Maps
+# (closeout-fleet, LOCATION) -> the debrief-fleet key used to load/compare. At DFW
+# the Envoy and Regional closeout arrays reconcile against the Envoy workbook's DFW
+# sheet, not the normal "Envoy General" sheet. The report/Program label keeps the
+# original closeout-fleet name (Envoy/Regional); only the debrief source changes.
+FLEET_LOCATION_OVERRIDE = {
+    ("Envoy",    "DFW"): "DFW_Envoy",
+    ("Regional", "DFW"): "DFW_Regional",
 }
 
 # Fleets reconciled at tail level only (services ignored) regardless of the
@@ -211,6 +256,7 @@ CLOSEOUT_TOKEN_MAP = {
     "ED1": "ED1", "ED2": "ED2", "ED3": "ED3", "ED4": "ED4",
     "IHC": "IHC",
     "RON": "RON",
+    "RRON": "RRON",   # DFW regional-carrier RON (own column in DFW_Debriefs)
     "LAV": "LAV",
     # Mesa (IAH) field 298 abbreviations
     "EC": "EC",
@@ -242,6 +288,7 @@ DEBRIEF_COL_MAP = {
     # ED2, CE) rather than the long parenthesized PSA/Envoy form.
     "IHC": "IHC",
     "RON": "RON",
+    "RRON": "RRON",   # DFW "DFW_Debriefs" table regional-RON column
     "ED1": "ED1",
     "ED2": "ED2",
     "CE": "CE",
@@ -294,16 +341,23 @@ def _canon_closeout_service(raw_service_string):
 
 
 # Ultra is a "value-service" fleet: rather than a set of yes/no service columns,
-# a single value names the service performed ("Widebody Ultra" / "Narrowbody
-# Ultra"). The same value appears on the closeout (the ultra row's "Ultra" key)
-# and in the Ultra debrief's "Service" column, so both sides normalize through
-# _canon_ultra_service and compare directly. Unknown values are kept as-is
-# (whitespace-collapsed) so they still surface as a mismatch rather than vanish.
+# a single value names the service performed. The value appears on the closeout
+# (the ultra row's "Ultra" or "Service(s)" key) and in the Ultra debrief's
+# "Service" column, so both sides normalize through _canon_ultra_service and
+# compare directly. The DFW Ultra closeout says "Ultra Clean"/"Shroud Clean"
+# while the debrief writes "Ultra Cleaning"/"Shroud Cleaning" — both fold to the
+# same canonical code here. Unknown values are kept as-is (whitespace-collapsed)
+# so they still surface as a mismatch rather than vanish.
 ULTRA_SERVICE_MAP = {
     "WIDEBODY ULTRA":   "Widebody Ultra",
     "NARROWBODY ULTRA": "Narrowbody Ultra",
     "WIDEBODY":         "Widebody Ultra",
     "NARROWBODY":       "Narrowbody Ultra",
+    # DFW Ultra vocabulary (closeout "… Clean" vs debrief "… Cleaning")
+    "ULTRA CLEANING":   "Ultra",
+    "ULTRA CLEAN":      "Ultra",
+    "SHROUD CLEANING":  "Shroud",
+    "SHROUD CLEAN":     "Shroud",
 }
 
 
@@ -316,13 +370,33 @@ def _canon_ultra_service(raw):
     return {ULTRA_SERVICE_MAP.get(s.upper(), s)}
 
 
+def _canon_frontier_service(raw):
+    """A Frontier service value (closeout 'Service' key or debrief 'Aircraft Type
+    and Service' column) -> a one-element set of the canonical label. Values match
+    verbatim ("A320 Heavy Clean"/"A321 Heavy Clean") — just whitespace/case-fold
+    so the two sides compare; unknown values are kept (title form) rather than
+    dropped."""
+    s = " ".join(str(raw or "").split())
+    if not s:
+        return set()
+    return {FRONTIER_SERVICE_MAP.get(s.upper(), s)}
+
+
+FRONTIER_SERVICE_MAP = {
+    "A320 HEAVY CLEAN": "A320 Heavy Clean",
+    "A321 HEAVY CLEAN": "A321 Heavy Clean",
+}
+
+
 # "Value-service" fleets: a single debrief column whose VALUE names the service
 # performed, instead of one yes/no column per service code. Maps fleet -> (column
 # header, canonicalizer). The canonicalizer must match the one used on the
 # closeout side for that fleet so the two values compare. Ultra's "Service" column
-# holds "Widebody Ultra"/"Narrowbody Ultra".
+# holds the ultra/shroud cleaning value; Frontier's "Aircraft Type and Service"
+# column holds the A320/A321 Heavy Clean value.
 DEBRIEF_VALUE_SERVICE = {
     "Ultra": ("Service", _canon_ultra_service),
+    "Frontier": ("Aircraft Type and Service", _canon_frontier_service),
 }
 
 
@@ -432,8 +506,20 @@ NAMED_KEY_FLEET_FIELDS = [
      ("Service(s) Performed", "Service Performed", "Services"),
      _canon_closeout_service),
     ("Ultra", "ultra", ("Tail Number", "Tail", "Dropdown"),
-     ("Ultra", "Service(s) Performed", "Service Performed", "Services"),
+     ("Ultra", "Service(s)", "Service(s) Performed", "Service Performed", "Services"),
      _canon_ultra_service),
+    # DFW Regional carriers (Skywest/PSA/…) — same multi-code service string as
+    # Envoy (RRON etc.); reconciled against the Regional rows of the Envoy DFW
+    # sheet (DEBRIEF_ROW_FILTER["DFW_Regional"]).
+    ("Regional", "regional", ("Tail Number", "Tail", "Dropdown"),
+     ("Service(s) Performed", "Service Performed", "Services", "Service(s)"),
+     _canon_closeout_service),
+    # Frontier — single value-service ("A320 Heavy Clean"/"A321 Heavy Clean")
+    # under the "Service" key; compared against the Frontier debrief's "Aircraft
+    # Type and Service" column, filtered to the closeout location.
+    ("Frontier", "frontier", ("Tail Number", "Tail", "Dropdown"),
+     ("Service", "Service(s) Performed", "Services"),
+     _canon_frontier_service),
     # Breeze (BDL) — single "Service" value per aircraft (RON/Ultra/Other),
     # canonicalized by _canon_breeze_service and compared against the Breeze
     # debrief's "Breeze RON"/"Breeze Ultra" columns.
@@ -763,6 +849,16 @@ def load_debrief_day(fleet, closeout_loc, date):
         svc_cols = {i: DEBRIEF_COL_MAP[h] for i, h in enumerate(header)
                     if h in DEBRIEF_COL_MAP}
 
+    # Row filter: fleets that share a sheet and are told apart by a column value
+    # (DFW_Envoy vs DFW_Regional). Resolve the column index once; rows failing the
+    # predicate are skipped. Absent column -> no rows kept (fail closed).
+    row_filter = DEBRIEF_ROW_FILTER.get(fleet)
+    if row_filter:
+        rf_header, rf_pred = row_filter
+        rf_idx = header.index(rf_header) if rf_header in header else None
+    else:
+        rf_idx = None
+
     result = defaultdict(set)
     row_counts = defaultdict(int)            # tail -> number of debrief rows today
     occurrences = defaultdict(list)          # tail -> [sorted services] per row
@@ -772,6 +868,9 @@ def load_debrief_day(fleet, closeout_loc, date):
             d = d.date()
         if d != date:
             continue
+        if row_filter:
+            if rf_idx is None or not rf_pred(r[rf_idx]):
+                continue
         if loc_idx is not None:
             loc = r[loc_idx]
             if fleet == "Envoy" and str(loc).strip().upper() in ENVOY_IGNORE_LOCATIONS:
@@ -954,9 +1053,13 @@ def reconcile(body):
     # Skip check compares the airport code with any '-Program' suffix removed, so
     # 'DFW-Envoy'/'IAH-PSA' are caught. Multi-word skips like 'STL AD HOC' have no
     # dash, so their base is themselves and a plain 'STL' will NOT match them.
+    # SKIP_LOCATIONS applies only to the MAIN closeout: a location-specific
+    # named-key closeout (e.g. dfw_closeout_submitted) is an explicit per-location
+    # opt-in and must process even for a location the main form skips. DFW is the
+    # case in point — skipped on the main form, reconciled via its own DFW form.
     loc_base = loc.strip().upper().split("-")[0]
     skip_bases = {s.upper().split("-")[0] for s in SKIP_LOCATIONS}
-    if loc_base in skip_bases:
+    if loc_base in skip_bases and not _is_named_key_payload(body):
         return {"skipped": True, "reason": f"Location '{loc}' is in SKIP_LOCATIONS",
                 "location": loc, "date": str(date)}
     if date is None:
@@ -973,7 +1076,11 @@ def reconcile(body):
     has_any = False
     has_dupes = False
     for fleet, co_tails in fleets_present.items():
-        db_tails, db_duplicates = load_debrief_day(fleet, loc, date)
+        # Some fleets read a different debrief sheet at certain locations (Envoy/
+        # Regional at DFW live in the Envoy workbook's DFW sheet). Resolve the
+        # debrief-fleet key for loading; the Program/report label stays `fleet`.
+        debrief_fleet = FLEET_LOCATION_OVERRIDE.get((fleet, loc_base), fleet)
+        db_tails, db_duplicates = load_debrief_day(debrief_fleet, loc, date)
         # Tails whose closeout service can't be verified against the debrief
         # (e.g. Breeze "Other") — reconciled for presence but not service.
         exempt = {t for t, s in co_tails.items()

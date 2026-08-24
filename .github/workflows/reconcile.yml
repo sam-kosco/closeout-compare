@@ -19,7 +19,12 @@ on:
     #   key "jsx"). Unlike the others its payload carries an explicit "location"
     #   key (JSX runs at many stations), which the reconciler uses over the event
     #   type.
-    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted, sgf_closeout_submitted, lit_closeout_submitted, bdl_closeout_submitted, jsx_closeout_submitted]
+    # dfw_closeout_submitted = DFW closeout (named-key payload with FOUR fleets:
+    #   envoy, regional, ultra, frontier). Envoy+Regional reconcile against the
+    #   Envoy workbook's DFW sheet (split by the Envoy Aircraft/Regional Carrier
+    #   columns); Ultra/Frontier against their own debriefs filtered to DFW. DFW is
+    #   in SKIP_LOCATIONS for the main form but named-key closeouts bypass that.
+    types: [closeout_submitted, cmh_closeout_submitted, xna_closeout_submitted, sgf_closeout_submitted, lit_closeout_submitted, bdl_closeout_submitted, jsx_closeout_submitted, dfw_closeout_submitted]
   workflow_dispatch:
     inputs:
       payload:
