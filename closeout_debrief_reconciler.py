@@ -228,6 +228,16 @@ IAH_DISPATCH_STATE_PATH = os.environ.get(
     "Power Flows/Commercial Closeout/iah_dispatch_state.json")
 IAH_DISPATCH_STATE_KEEP = int(os.environ.get("IAH_DISPATCH_STATE_KEEP", "60"))
 
+# Closeout-submission heartbeat for the daily monitor (Foxtrot-Aviation-Services/
+# core, jobs/monitor.py). Each location-based (named-key) closeout run stamps its
+# location's last-submission time into this Data Hub sidecar; the monitor reads it
+# and flags any watched location that has gone quiet (a station that stopped
+# submitting nightly closeouts). This drive is the DataHub Shared Documents drive
+# — the same one the monitor reads — so the path resolves identically on both
+# sides. Best-effort: a write failure here never fails the reconciliation run.
+CLOSEOUT_SUBMISSIONS_PATH = os.environ.get(
+    "CLOSEOUT_SUBMISSIONS_PATH", "Monitoring/closeout_submissions.json")
+
 # Discrepancy records → Power Automate. For every discrepancy found during
 # reconciliation, a JSON packet is POSTed as its own HTTP request to a Power
 # Automate "When an HTTP request is received" flow, which appends a row to a
@@ -1685,6 +1695,34 @@ def _record_iah_dispatch(date):
         print(f"\n[IAH dispatch state write failed for {date}: {e}]", flush=True)
 
 
+def _record_closeout_submission(location, service_date, submitter):
+    """Stamp this location's latest closeout submission into the monitor sidecar
+    (CLOSEOUT_SUBMISSIONS_PATH) so the daily monitor can flag a location that has
+    gone quiet. Keyed by the bare location code (upper). Best-effort: any failure
+    is logged and never fails the reconciliation run. Only meaningful in Graph
+    mode — skipped when there is no drive/credentials (e.g. local dry runs)."""
+    loc = (location or "").strip().upper().split("-")[0]
+    if not loc or DEBRIEF_SOURCE != "graph" or not GRAPH_CLIENT_SECRET:
+        return
+    state = _graph_get_json(CLOSEOUT_SUBMISSIONS_PATH) or {}
+    locs = state.get("locations") or {}
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    locs[loc] = {
+        "last_submission_utc": now,
+        "last_service_date": str(service_date) if service_date else None,
+        "submitter": submitter or None,
+    }
+    state["locations"] = locs
+    state["updated_utc"] = now
+    try:
+        _graph_put_json(CLOSEOUT_SUBMISSIONS_PATH, state)
+        print(f"\n[closeout submission recorded for monitor: {loc} "
+              f"(service date {service_date})]", flush=True)
+    except Exception as e:  # noqa: BLE001 — bookkeeping must never fail the run
+        print(f"\n[closeout submission heartbeat write failed for {loc}: {e}]",
+              flush=True)
+
+
 def _send_iah_dispatch(body):
     """Build and send the IAH dispatch email. For IAH submissions, the sender
     address and sign-off name are constructed from field 3 (submitter name).
@@ -1764,6 +1802,14 @@ def main():
 
     if report.get("skipped"):
         return  # location skipped (DFW/STL AD HOC) or unparseable — no email
+
+    # Heartbeat for the daily monitor: record that this location-based closeout
+    # submitted, so the monitor can flag a location that has gone quiet. Only for
+    # named-key (location-based) closeouts — the main form's many dropdown stations
+    # aren't on the monitor's per-location watch. Best-effort.
+    if _is_named_key_payload(body):
+        _record_closeout_submission(report.get("location"), report.get("date"),
+                                    report.get("submitter"))
 
     send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
 
