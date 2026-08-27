@@ -1707,9 +1707,18 @@ def _record_closeout_submission(location, service_date, submitter):
     state = _graph_get_json(CLOSEOUT_SUBMISSIONS_PATH) or {}
     locs = state.get("locations") or {}
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    svc = str(service_date) if service_date else None
+    # High-water mark (Sam, 2026-08-27): a correction re-submitted FOR an
+    # older night (fix the 25th after the 26th was already filed) must not
+    # regress the newest-night-covered signal the daily monitor checks.
+    # ISO dates compare lexicographically, so max() is safe on strings.
+    prev = locs.get(loc) or {}
+    prev_max = prev.get("max_service_date") or prev.get("last_service_date")
+    candidates = [x for x in (prev_max, svc) if x]
     locs[loc] = {
         "last_submission_utc": now,
-        "last_service_date": str(service_date) if service_date else None,
+        "last_service_date": svc,
+        "max_service_date": max(candidates) if candidates else None,
         "submitter": submitter or None,
     }
     state["locations"] = locs
