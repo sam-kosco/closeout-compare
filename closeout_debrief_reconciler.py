@@ -1715,10 +1715,16 @@ def _record_closeout_submission(location, service_date, submitter):
     prev = locs.get(loc) or {}
     prev_max = prev.get("max_service_date") or prev.get("last_service_date")
     candidates = [x for x in (prev_max, svc) if x]
+    # Per-night coverage (Sam, 2026-08-27): the monitor's Monday scan checks
+    # Fri/Sat/Sun individually, which the high-water mark alone can't
+    # answer. Rolling 14 nights is plenty for any lookback it does.
+    covered = set(prev.get("covered_dates") or [])
+    covered.update(x for x in (prev.get("last_service_date"), svc) if x)
     locs[loc] = {
         "last_submission_utc": now,
         "last_service_date": svc,
         "max_service_date": max(candidates) if candidates else None,
+        "covered_dates": sorted(covered)[-14:],
         "submitter": submitter or None,
     }
     state["locations"] = locs
