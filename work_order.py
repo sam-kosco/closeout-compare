@@ -18,6 +18,11 @@ the plain closeout↔debrief reconciliation does not:
      work that wasn't needed for compliance. Only compliance-TRACKED services are
      considered (a service the work order vocabulary doesn't know is ignored).
 
+It also detects the wrong-file case: `is_work_order(parsed)` is False when the
+uploaded PDF has no Nightly Work Order header (e.g. someone attached the Labor
+Pulse Sheet, or a blank/garbage file). The reconciler raises an "invalid work
+order" flag on that so the upload error surfaces rather than passing silently.
+
 The parser takes already-extracted text (the reconciler extracts it with pypdf),
 so this module has no PDF dependency and is trivially testable. Each work order
 self-identifies its fleet in the header line ("Envoy Fleet — Nightly Work Order
@@ -129,6 +134,7 @@ def parse_work_order(text):
     NONCOMPLIANT / DUE SOON / COMPLIANT)."""
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     fleet = date = None
+    header_found = False       # the "<Fleet> — Nightly Work Order" header was seen
     tails = {}
     on_shift = set()
     unknown = []
@@ -136,7 +142,8 @@ def parse_work_order(text):
     cur = None                # current tail
 
     for ln in lines:
-        if fleet is None and re.search(r"\bFleet\b.*Work Order", ln, re.I):
+        if not header_found and re.search(r"\bFleet\b.*Work Order", ln, re.I):
+            header_found = True
             fleet = _fleet_from_header(ln)
             date = _parse_date(ln)
             continue
@@ -201,7 +208,19 @@ def parse_work_order(text):
                     entry["station"] = station
 
     return {"fleet": fleet, "date": date, "tails": tails,
-            "on_shift": on_shift, "unknown_services": unknown}
+            "on_shift": on_shift, "unknown_services": unknown,
+            # False when the uploaded PDF isn't a real Nightly Work Order (wrong
+            # file — e.g. someone attached the Labor Pulse Sheet instead). The
+            # reconciler raises an "invalid work order" flag on this. A genuine
+            # work order with everything compliant still has is_work_order=True.
+            "is_work_order": header_found}
+
+
+def is_work_order(parsed):
+    """True if the parsed PDF is a genuine Nightly Work Order (its header was
+    found). False for the wrong-file case (Labor Pulse Sheet, blank/garbage
+    extraction, a non-work-order PDF) — which the reconciler flags."""
+    return bool(parsed.get("is_work_order"))
 
 
 def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAYS):
