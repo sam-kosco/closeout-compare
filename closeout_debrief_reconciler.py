@@ -1961,26 +1961,28 @@ def _work_order_from_url(url, hint=None):
     """Resolve one uploaded work-order file to a parsed work order, whether it is
     the PDF itself or a PHOTO of the work order's QR code.
 
-    Returns (parsed, err): `parsed` is the same dict shape parse_work_order() /
-    from_snapshot() produce (or None), and `err` is a short human reason when it
-    can't be resolved (fuels the 'invalid work order' finding)."""
+    Returns (parsed, err, kind): `parsed` is the same dict shape
+    parse_work_order() / from_snapshot() produce (or None), `err` is a short human
+    reason when it can't be resolved (fuels the 'invalid work order' finding), and
+    `kind` is 'pdf' | 'photo' | 'unknown' (labels the work-order link in the
+    discrepancy email)."""
     content, ctype = _download_work_order_bytes(url)
     if content is None:
-        return None, "could not download the uploaded file"
+        return None, "could not download the uploaded file", "unknown"
     # PDF (laptop upload) -> extract + parse the same as before.
     if content[:5] == b"%PDF-" or "pdf" in (ctype or "").lower():
         parsed = work_order.parse_work_order(_pdf_text(content) or "")
         if not work_order.is_work_order(parsed):
-            return None, "uploaded file is not a valid work order"
-        return parsed, None
+            return None, "uploaded file is not a valid work order", "pdf"
+        return parsed, None, "pdf"
     # Otherwise treat it as an image of the QR code (phone upload).
     woid = _decode_qr_woid(content)
     if not woid:
-        return None, "uploaded image has no readable work-order QR code"
+        return None, "uploaded image has no readable work-order QR code", "photo"
     snap = _fetch_work_order_snapshot(woid)
     if not snap:
-        return None, f"work order {woid} was not found in the store"
-    return work_order.from_snapshot(snap, hint), None
+        return None, f"work order {woid} was not found in the store", "photo"
+    return work_order.from_snapshot(snap, hint), None, "photo"
 
 
 def _prune_work_order_store():
@@ -2058,10 +2060,15 @@ def _canon_work_order(parsed, fleet):
 
 def collect_work_order_findings(body, loc, date):
     """Parse every uploaded work order (payload '<fleet>_wo' keys) and evaluate it
-    against the debrief. Returns a flat list of finding dicts:
-        {fleet, type, tail, service, detail}
-    type in {missed, unnecessary, off_work_order, invalid}. Best-effort."""
+    against the debrief. Returns (findings, sources):
+        findings — flat list of {fleet, type, tail, service, detail};
+                   type in {missed, unnecessary, off_work_order, invalid}.
+        sources  — one {fleet, url, kind, ok} per uploaded work-order file, so the
+                   discrepancy email can LINK the work order Clara/Maren are
+                   reconciling against (kind = 'pdf' | 'photo').
+    Best-effort."""
     findings = []
+    sources = []
     for key, value in body.items():
         k = str(key).lower()
         # The general Commercial Closeout 2.0 sends a bare 'wo' (one work order,
@@ -2075,14 +2082,17 @@ def collect_work_order_findings(body, loc, date):
             continue
         hint = WO_KEY_FLEET.get(prefix) or (prefix.upper() or None)
         for url in _wo_urls(value):
-            parsed, err = _work_order_from_url(url, hint)   # PDF or QR-photo
+            parsed, err, kind = _work_order_from_url(url, hint)   # PDF or QR-photo
             if parsed is None:
                 fname = url.rstrip("/").rsplit("/", 1)[-1][:60]
                 findings.append({"fleet": hint or "unknown", "type": "invalid",
                                  "tail": None, "service": None,
                                  "detail": f"{err} ({fname})"})
+                sources.append({"fleet": hint or "unknown", "url": url,
+                                "kind": kind, "ok": False})
                 continue
             fleet = parsed.get("fleet") or hint or "unknown"
+            sources.append({"fleet": fleet, "url": url, "kind": kind, "ok": True})
             try:
                 db = _debrief_serviced_by_tail(fleet, loc, date)
             except Exception as e:  # noqa: BLE001
@@ -2104,14 +2114,17 @@ def collect_work_order_findings(body, loc, date):
                 findings.append({"fleet": fleet, "type": "off_work_order", "tail": o["tail"],
                                  "service": ", ".join(o["services"]),
                                  "detail": o["detail"]})
-    return findings
+    return findings, sources
 
 
-def build_work_order_section_html(findings):
-    """HTML block for the closeout email listing work-order findings, grouped by
-    type. Empty string if there are none."""
+def build_work_order_section_html(findings, sources=None):
+    """HTML block for the closeout email: a link to each work order that was
+    reviewed (so Clara/Maren can open what the closeout was compared against),
+    then any findings grouped by type. Empty string only if there's nothing to
+    show (no findings and no sources)."""
     import html as _h
-    if not findings:
+    sources = sources or []
+    if not findings and not sources:
         return ""
     order = [("invalid", "⚠ Invalid work order — the uploaded file is not a work order", "#b00020"),
              ("missed", "Overdue / due-soon jobs NOT debriefed", "#b00020"),
@@ -2124,6 +2137,23 @@ def build_work_order_section_html(findings):
              'border-top:2px solid #1F3864;padding-top:8px;">'
              '<p style="font-weight:bold;color:#1F3864;font-size:15px;margin:0 0 4px;">'
              'Work Order Check</p>']
+    # Link the reviewed work order(s) first — this is what the closeout is
+    # reconciled against, one link per uploaded file (PDF or a photo of the QR).
+    if sources:
+        links = []
+        for s in sources:
+            fleet = _h.escape(str(s.get("fleet") or "?"))
+            kind = "photo" if s.get("kind") == "photo" else "PDF"
+            note = "" if s.get("ok", True) else " — unreadable"
+            url = _h.escape(str(s.get("url") or ""), quote=True)
+            links.append(f'<a href="{url}" style="color:#1F3864;">{fleet} work order '
+                         f'({kind}){note}</a>')
+        parts.append('<p style="margin:2px 0 6px;font-size:13px;">Reviewed: '
+                     + " &nbsp;·&nbsp; ".join(links) + "</p>")
+    if not findings:
+        parts.append('<p style="margin:2px 0;font-size:13px;color:#1a7f37;">'
+                     '✓ No work-order discrepancies.</p></div>')
+        return "".join(parts)
     for typ, label, color in order:
         items = groups.get(typ)
         if not items:
@@ -2146,11 +2176,20 @@ def build_work_order_section_html(findings):
     return "".join(parts)
 
 
-def build_work_order_section_text(findings):
+def build_work_order_section_text(findings, sources=None):
     """Plain-text version of the work-order section (for the opt-in AI email)."""
-    if not findings:
+    sources = sources or []
+    if not findings and not sources:
         return ""
     lines = ["", "----- WORK ORDER CHECK -----"]
+    for s in sources:
+        kind = "photo" if s.get("kind") == "photo" else "PDF"
+        note = "" if s.get("ok", True) else " (unreadable)"
+        lines.append(f"  Reviewed {s.get('fleet') or '?'} work order ({kind}){note}: "
+                     f"{s.get('url') or ''}")
+    if not findings:
+        lines.append("  No work-order discrepancies.")
+        return "\n".join(lines)
     for typ, label in (("invalid", "Invalid work order"),
                        ("missed", "Overdue/due-soon NOT debriefed"),
                        ("off_work_order", "Debriefed but NOT on the work order"),
@@ -2238,7 +2277,7 @@ def work_order_arrival_report(body):
         saw_key = True
         hint = WO_KEY_FLEET.get(prefix) or (prefix.upper() or None)
         for url in _wo_urls(value):        # empty/blank keys contribute nothing
-            parsed, err = _work_order_from_url(url, hint)   # PDF or QR-photo
+            parsed, err, _kind = _work_order_from_url(url, hint)   # PDF or QR-photo
             fname = url.rstrip("/").rsplit("/", 1)[-1][:70]
             if parsed is not None:
                 entries.append({"fleet": parsed.get("fleet") or hint or "?",
@@ -2333,6 +2372,7 @@ def main():
     # (missed/unnecessary/off/invalid) feeds the email section + Closeout Compare
     # worksheet. Best-effort — never blocks the discrepancy email/records.
     wo_findings = []
+    wo_sources = []
     try:
         _prune_work_order_store()             # daily-gated retention sweep (best-effort)
     except Exception as e:  # noqa: BLE001
@@ -2340,7 +2380,8 @@ def main():
     try:
         _co = extract_closeout(body)          # parsed date object + location
         if WORKORDER_FINDINGS_ENABLED:
-            wo_findings = collect_work_order_findings(body, _co["location"], _co["date"])
+            wo_findings, wo_sources = collect_work_order_findings(
+                body, _co["location"], _co["date"])
             if wo_findings:
                 print(f"\n----- WORK ORDER FINDINGS ({len(wo_findings)}) -----", flush=True)
                 for f in wo_findings:
@@ -2379,13 +2420,15 @@ def main():
     if email is None:
         return
 
-    # Append the work-order section (missed / off-work-order / unnecessary /
-    # invalid) to the closeout email — shown even on an otherwise-clean closeout.
-    if wo_findings:
+    # Append the work-order section to the closeout email — a LINK to each work
+    # order reviewed (so Clara/Maren can open what the closeout was compared
+    # against) plus any findings. Shown whenever a work order was submitted, even
+    # on an otherwise-clean closeout.
+    if wo_findings or wo_sources:
         if email.get("content_type") == "HTML":
-            email["body"] = email["body"] + build_work_order_section_html(wo_findings)
+            email["body"] = email["body"] + build_work_order_section_html(wo_findings, wo_sources)
         else:
-            email["body"] = email["body"] + build_work_order_section_text(wo_findings)
+            email["body"] = email["body"] + build_work_order_section_text(wo_findings, wo_sources)
 
     # Log the draft so it's visible even if sending fails.
     print("\n----- EMAIL -----", flush=True)
