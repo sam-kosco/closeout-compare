@@ -31,6 +31,8 @@ import time
 
 from openpyxl import load_workbook
 
+import work_order  # nightly work-order parse + missed/unnecessary/off/invalid checks
+
 # ----- CONFIG -----------------------------------------------------------------
 
 # (1) At CVG a closeout carries both PSA (field 27) and Envoy (field 45) aircraft.
@@ -1789,6 +1791,249 @@ def _send_iah_dispatch(body):
     raise RuntimeError(f"IAH dispatch failed for all senders; last error: {last_error}")
 
 
+# ----- WORK ORDER COMPLIANCE CHECK -------------------------------------------
+# Closeouts upload their nightly work order (a PDF from the compliance trackers)
+# under a per-fleet payload key "<fleet>_wo" (e.g. envoy_wo), value = the file URL
+# (a JotForm upload URL, fetchable unauthenticated). work_order.py parses it and
+# cross-references the debrief; findings go in the email and on a SEPARATE
+# worksheet of the Closeout Compare workbook (not the true-discrepancy sheet).
+
+WORKORDER_COMPARE_SP_PATH = os.environ.get(
+    "WORKORDER_COMPARE_SP_PATH", "Power Flows/Debriefs/Closeout Compare.xlsx")
+WORKORDER_SHEET = os.environ.get("WORKORDER_SHEET", "Work Order Findings")
+WORKORDER_HEADERS = ["Location", "Tail", "Date", "Program", "Finding", "Service",
+                     "Detail", "Status", "Notes", "Comp Anlyst"]
+WO_FINDING_LABEL = {"missed": "Missed priority", "unnecessary": "Unnecessary",
+                    "off_work_order": "Off work order", "invalid": "Invalid work order"}
+
+# "<fleet>_wo" key prefix -> reconciler fleet.
+WO_KEY_FLEET = {"envoy": "Envoy", "regional": "Regional", "ultra": "Ultra",
+                "frontier": "Frontier", "psa": "PSA", "gojet": "GoJet",
+                "mesa": "Mesa", "breeze": "Breeze", "jsx": "JSX"}
+
+
+def _wo_urls(value):
+    """A '<fleet>_wo' payload value -> list of URLs. Accepts a bare URL string, a
+    JSON-encoded array string, a list, or JotForm's file-field [{'url':…}, …]."""
+    urls = []
+    if value is None:
+        return urls
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith("["):                 # JSON array string
+            value = _parse_array(s)            # falls back to [] on bad JSON
+        elif s:
+            return [s]
+        else:
+            return urls
+    if isinstance(value, dict):
+        value = [value]
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                urls.append(item.strip())
+            elif isinstance(item, dict) and item.get("url"):
+                urls.append(item["url"])
+    return urls
+
+
+def _download_work_order_text(url):
+    """Download a work-order PDF (unauthenticated) and extract its text with
+    pypdf. Returns the text, or None if it can't be fetched/read."""
+    import requests
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        print("[pypdf not installed — cannot parse work orders]", flush=True)
+        return None
+    try:
+        r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        reader = PdfReader(io.BytesIO(r.content))
+        return "\n".join((pg.extract_text() or "") for pg in reader.pages)
+    except Exception as e:  # noqa: BLE001 — surface as an invalid/unreadable finding
+        print(f"[work order download/extract failed ({url[:70]}…): {e}]", flush=True)
+        return None
+
+
+def _debrief_serviced_by_tail(fleet, loc, date):
+    """The debrief's {canon_tail: set(services)} for a fleet at the closeout's
+    location/date, resolving the location-specific debrief source (e.g. DFW Envoy
+    -> DFW_Envoy) the same way reconcile() does. None if the fleet is unknown."""
+    loc_base = (loc or "").strip().upper().split("-")[0]
+    debrief_fleet = FLEET_LOCATION_OVERRIDE.get((fleet, loc_base), fleet)
+    if debrief_fleet not in DEBRIEF_SHEETS:
+        return None
+    db_map, _dupes = load_debrief_day(debrief_fleet, loc, date)
+    return db_map
+
+
+def _canon_work_order(parsed, fleet):
+    """Return the parsed work order with its tail keys / on_shift canonicalized
+    via _canon_tail(fleet, …) so they compare against the debrief on the same form
+    (GoJet reduces to the numeric core on both sides)."""
+    tails = {_canon_tail(fleet, t): info for t, info in parsed["tails"].items()}
+    on_shift = {_canon_tail(fleet, t) for t in parsed["on_shift"]}
+    out = dict(parsed)
+    out["tails"] = tails
+    out["on_shift"] = on_shift
+    return out
+
+
+def collect_work_order_findings(body, loc, date):
+    """Parse every uploaded work order (payload '<fleet>_wo' keys) and evaluate it
+    against the debrief. Returns a flat list of finding dicts:
+        {fleet, type, tail, service, detail}
+    type in {missed, unnecessary, off_work_order, invalid}. Best-effort."""
+    findings = []
+    for key, value in body.items():
+        if not str(key).lower().endswith("_wo"):
+            continue
+        prefix = str(key)[:-3].lower()
+        hint = WO_KEY_FLEET.get(prefix, prefix.upper())
+        for url in _wo_urls(value):
+            text = _download_work_order_text(url)
+            parsed = work_order.parse_work_order(text or "")
+            fleet = parsed.get("fleet") or hint
+            if not work_order.is_work_order(parsed):
+                fname = url.rstrip("/").rsplit("/", 1)[-1][:60]
+                findings.append({"fleet": fleet, "type": "invalid", "tail": None,
+                                 "service": None,
+                                 "detail": f"uploaded file is not a valid work order ({fname})"})
+                continue
+            try:
+                db = _debrief_serviced_by_tail(fleet, loc, date)
+            except Exception as e:  # noqa: BLE001
+                print(f"[work order: debrief load failed for {fleet}: {e}]", flush=True)
+                db = None
+            if db is None:
+                findings.append({"fleet": fleet, "type": "invalid", "tail": None,
+                                 "service": None,
+                                 "detail": f"no debrief available to check the {fleet} work order"})
+                continue
+            res = work_order.evaluate(_canon_work_order(parsed, fleet), db)
+            for m in res["missed"]:
+                findings.append({"fleet": fleet, "type": "missed", "tail": m["tail"],
+                                 "service": m["service"], "detail": m["priority"]})
+            for u in res["unnecessary"]:
+                findings.append({"fleet": fleet, "type": "unnecessary", "tail": u["tail"],
+                                 "service": u["service"], "detail": u["detail"]})
+            for o in res["off_work_order"]:
+                findings.append({"fleet": fleet, "type": "off_work_order", "tail": o["tail"],
+                                 "service": ", ".join(o["services"]),
+                                 "detail": o["detail"]})
+    return findings
+
+
+def build_work_order_section_html(findings):
+    """HTML block for the closeout email listing work-order findings, grouped by
+    type. Empty string if there are none."""
+    import html as _h
+    if not findings:
+        return ""
+    order = [("invalid", "⚠ Invalid work order — the uploaded file is not a work order", "#b00020"),
+             ("missed", "Overdue / due-soon jobs NOT debriefed", "#b00020"),
+             ("off_work_order", "Debriefed but NOT on the work order", "#1F3864"),
+             ("unnecessary", "Serviced but not due (possible unnecessary work)", "#1F3864")]
+    groups = {}
+    for f in findings:
+        groups.setdefault(f["type"], []).append(f)
+    parts = ['<div style="font-family:Arial,sans-serif;font-size:14px;margin-top:20px;'
+             'border-top:2px solid #1F3864;padding-top:8px;">'
+             '<p style="font-weight:bold;color:#1F3864;font-size:15px;margin:0 0 4px;">'
+             'Work Order Check</p>']
+    for typ, label, color in order:
+        items = groups.get(typ)
+        if not items:
+            continue
+        parts.append(f'<p style="font-weight:bold;color:{color};margin:10px 0 2px;">'
+                     f'{_h.escape(label)}</p><ul style="margin:0;padding-left:20px;font-size:13px;">')
+        for f in items:
+            fleet = _h.escape(str(f.get("fleet") or ""))
+            tail = _h.escape(str(f.get("tail") or ""))
+            svc = _h.escape(str(f.get("service") or ""))
+            det = _h.escape(str(f.get("detail") or ""))
+            if typ == "invalid":
+                parts.append(f"<li>[{fleet}] {det}</li>")
+            elif typ == "off_work_order":
+                parts.append(f"<li><b>{tail}</b> [{fleet}] — debriefed ({svc}) but not on the work order</li>")
+            else:
+                parts.append(f"<li><b>{tail}</b> [{fleet}] {svc} — {det}</li>")
+        parts.append("</ul>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def build_work_order_section_text(findings):
+    """Plain-text version of the work-order section (for the opt-in AI email)."""
+    if not findings:
+        return ""
+    lines = ["", "----- WORK ORDER CHECK -----"]
+    for typ, label in (("invalid", "Invalid work order"),
+                       ("missed", "Overdue/due-soon NOT debriefed"),
+                       ("off_work_order", "Debriefed but NOT on the work order"),
+                       ("unnecessary", "Serviced but not due")):
+        items = [f for f in findings if f["type"] == typ]
+        if not items:
+            continue
+        lines.append(f"  {label}:")
+        for f in items:
+            bits = [f.get("tail") or "", f"[{f.get('fleet') or ''}]",
+                    f.get("service") or "", f"— {f.get('detail') or ''}"]
+            lines.append("    " + " ".join(b for b in bits if b).strip())
+    return "\n".join(lines)
+
+
+def write_work_order_findings(findings, loc, date):
+    """Append work-order findings to a SEPARATE worksheet of the Closeout Compare
+    workbook via the Graph workbook API (direct write, best-effort — never fails
+    the run). Creates the worksheet + table on first use."""
+    if not findings:
+        return
+    import requests
+    encoded = "/".join(requests.utils.quote(seg)
+                       for seg in WORKORDER_COMPARE_SP_PATH.split("/"))
+    base = (f"https://graph.microsoft.com/v1.0/drives/{GRAPH_DRIVE_ID}"
+            f"/root:/{encoded}:/workbook")
+    sheet_q = requests.utils.quote(WORKORDER_SHEET)
+    loc_base = (loc or "").strip().upper().split("-")[0]
+    date_str = str(date)
+    rows = [[loc_base, f.get("tail") or "", date_str, f.get("fleet") or "",
+             WO_FINDING_LABEL.get(f["type"], f["type"]), f.get("service") or "",
+             f.get("detail") or "", "", "", ""] for f in findings]
+    try:
+        hdrs = {"Authorization": f"Bearer {_graph_token()}",
+                "Content-Type": "application/json"}
+        # ensure worksheet
+        if requests.get(f"{base}/worksheets/{sheet_q}", headers=hdrs,
+                        timeout=30).status_code == 404:
+            requests.post(f"{base}/worksheets/add", headers=hdrs,
+                          json={"name": WORKORDER_SHEET}, timeout=30).raise_for_status()
+        # ensure table (create over a written header row on first use)
+        tr = requests.get(f"{base}/worksheets/{sheet_q}/tables", headers=hdrs, timeout=30)
+        tr.raise_for_status()
+        tables = tr.json().get("value", [])
+        if tables:
+            table_id = tables[0]["id"]
+        else:
+            last_col = chr(ord("A") + len(WORKORDER_HEADERS) - 1)
+            requests.patch(
+                f"{base}/worksheets/{sheet_q}/range(address='A1:{last_col}1')",
+                headers=hdrs, json={"values": [WORKORDER_HEADERS]},
+                timeout=30).raise_for_status()
+            add = requests.post(f"{base}/worksheets/{sheet_q}/tables/add", headers=hdrs,
+                                json={"address": f"A1:{last_col}1", "hasHeaders": True},
+                                timeout=30)
+            add.raise_for_status()
+            table_id = add.json()["id"]
+        requests.post(f"{base}/tables/{table_id}/rows", headers=hdrs,
+                      json={"values": rows}, timeout=60).raise_for_status()
+        print(f"\n[{len(rows)} work-order finding(s) written to '{WORKORDER_SHEET}']",
+              flush=True)
+    except Exception as e:  # noqa: BLE001 — best-effort; never fail the run
+        print(f"\n[work-order workbook write failed: {e}]", flush=True)
+
+
 def main():
     body = _load_payload()
 
@@ -1826,6 +2071,20 @@ def main():
         _record_closeout_submission(report.get("location"), report.get("date"),
                                     report.get("submitter"))
 
+    # Work-order check: parse each uploaded work order (payload '<fleet>_wo' keys)
+    # and cross-reference the debrief. Best-effort — a failure here never blocks
+    # the discrepancy email/records.
+    wo_findings = []
+    try:
+        _co = extract_closeout(body)          # for the parsed date object + location
+        wo_findings = collect_work_order_findings(body, _co["location"], _co["date"])
+    except Exception as e:  # noqa: BLE001
+        print(f"\n[work order check failed: {e}]", flush=True)
+    if wo_findings:
+        print(f"\n----- WORK ORDER FINDINGS ({len(wo_findings)}) -----", flush=True)
+        for f in wo_findings:
+            print(json.dumps(f), flush=True)
+
     send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
 
     if report.get("has_discrepancies"):
@@ -1848,6 +2107,14 @@ def main():
         email = build_clean_email(report)         # deterministic, no API
     if email is None:
         return
+
+    # Append the work-order section (missed / off-work-order / unnecessary /
+    # invalid) to the closeout email — shown even on an otherwise-clean closeout.
+    if wo_findings:
+        if email.get("content_type") == "HTML":
+            email["body"] = email["body"] + build_work_order_section_html(wo_findings)
+        else:
+            email["body"] = email["body"] + build_work_order_section_text(wo_findings)
 
     # Log the draft so it's visible even if sending fails.
     print("\n----- EMAIL -----", flush=True)
@@ -1875,6 +2142,15 @@ def main():
                   flush=True)
         else:
             print("\n[SEND_EMAIL=false — discrepancy records drafted only, not posted]",
+                  flush=True)
+
+    # Work-order findings -> a SEPARATE worksheet of the Closeout Compare workbook
+    # (direct Graph write, not the discrepancy webhook). Honors SEND_EMAIL=false.
+    if wo_findings:
+        if send_on:
+            write_work_order_findings(wo_findings, _co["location"], _co["date"])
+        else:
+            print("\n[SEND_EMAIL=false — work-order findings drafted only, not written]",
                   flush=True)
 
 
