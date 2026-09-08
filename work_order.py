@@ -64,14 +64,31 @@ WORKORDER_SERVICE_MAP = {
     "ron clean": "RON", "ron": "RON",
 }
 
-# The set of canonical codes the work order / trackers manage on a DUE-DATE cycle
-# — used to EXCLUDE untracked services from the "unnecessary work" check ("exclude
-# the jobs not tracked for compliance"). Derived from the vocabulary above, minus
-# RON: RON is event-driven (a plane remained overnight), never carries a due date,
-# and never appears as "due" on a work order, so a debriefed RON must not be
-# flagged as unnecessary. Non-cycle Mesa codes (EC/FCD/ESS/Flight Deck) aren't in
-# the work-order vocabulary at all, so they're already excluded.
-TRACKED_SERVICES = set(WORKORDER_SERVICE_MAP.values()) - {"RON"}
+# Per-fleet service-name overrides. Same work-order text can mean different
+# canonical codes in different fleets: Mesa's "Exterior Detail" is ED, but JSX's
+# "Exterior Detail"/"Interior Detail"/"Carpet Extraction" are their own full-name
+# codes (matching the JSX debrief columns + _canon_jsx_service on the closeout
+# side). canon_service checks the fleet's overrides first, then the global map.
+FLEET_SERVICE_OVERRIDES = {
+    "JSX": {
+        "interior detail":  "Interior Detail",
+        "exterior detail":  "Exterior Detail",
+        "carpet extraction":"Carpet Extraction",
+        "ron cleaning":     "RON", "ron": "RON",
+        "biohazard":        "Biohazard",
+    },
+}
+
+# Canonical codes the work order / trackers manage on a DUE-DATE cycle — used to
+# EXCLUDE untracked services from the "unnecessary work" check ("exclude the jobs
+# not tracked for compliance"). Union of the global map and every fleet override,
+# minus RON and Biohazard: both are event-driven (RON = remained overnight;
+# Biohazard = as-needed), never carry a due date, and never appear as "due" on a
+# work order, so a debriefed RON/Biohazard must not be flagged as unnecessary.
+# Non-cycle Mesa codes (EC/FCD/ESS/Flight Deck) aren't in the vocabulary at all.
+TRACKED_SERVICES = (set(WORKORDER_SERVICE_MAP.values())
+                    | {v for m in FLEET_SERVICE_OVERRIDES.values() for v in m.values()}
+                    ) - {"RON", "Biohazard"}
 
 _DASH = r"[—–-]"                       # em / en / hyphen
 # A tail token: 3–8 chars of letters/digits, must contain a digit. Matches full
@@ -93,10 +110,15 @@ def _norm_service(name):
     return " ".join(str(name or "").replace("#", "").split()).lower()
 
 
-def canon_service(name):
+def canon_service(name, fleet=None):
     """Work-order service name -> canonical code, or None if it isn't a known
-    (compliance-tracked) service."""
-    return WORKORDER_SERVICE_MAP.get(_norm_service(name))
+    (compliance-tracked) service. Fleet-aware: a fleet's overrides win over the
+    global map (e.g. JSX 'Exterior Detail' -> 'Exterior Detail', not Mesa's ED)."""
+    key = _norm_service(name)
+    ov = FLEET_SERVICE_OVERRIDES.get(fleet or "")
+    if ov and key in ov:
+        return ov[key]
+    return WORKORDER_SERVICE_MAP.get(key)
 
 
 def _fleet_from_header(line):
@@ -183,7 +205,7 @@ def parse_work_order(text):
             if cur is None:
                 continue
             raw, days = (mo or ms).group(1), int((mo or ms).group(2))
-            code = canon_service(raw)
+            code = canon_service(raw, fleet)
             if code is None:
                 unknown.append(raw.strip())
                 continue
