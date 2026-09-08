@@ -17,6 +17,8 @@ the plain closeout↔debrief reconciliation does not:
      or coming due for that tail (not overdue, not in the "due soon" list), i.e.
      work that wasn't needed for compliance. Only compliance-TRACKED services are
      considered (a service the work order vocabulary doesn't know is ignored).
+  3. OFF WORK ORDER — a tail that was debriefed (serviced) but isn't on the work
+     order's roster at all: a plane worked that wasn't on the shift's work order.
 
 It also detects the wrong-file case: `is_work_order(parsed)` is False when the
 uploaded PDF has no Nightly Work Order header (e.g. someone attached the Labor
@@ -230,15 +232,16 @@ def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAY
     debrief's serviced jobs for the work order's fleet/date/location (what the
     reconciler already loads per fleet). Tails are upper/stripped.
 
-    Returns two lists of findings (each a dict with tail, service, and a
-    human-readable detail):
-      missed      — overdue or due-<=due_soon_days jobs absent from the debrief
-      unnecessary — debriefed tracked services the work order didn't have due
+    Returns three lists of findings (each a dict with tail and a human-readable
+    detail; the per-service lists also carry `service`):
+      missed         — overdue or due-<=due_soon_days jobs absent from the debrief
+      unnecessary    — debriefed tracked services the work order didn't have due
+      off_work_order — a tail that was debriefed but isn't on the work order at all
     """
     def dserv(tail):
         return {s for s in debrief_services_by_tail.get(tail, set())}
 
-    missed, unnecessary = [], []
+    missed, unnecessary, off_work_order = [], [], []
 
     # 1) MISSED PRIORITY: overdue, or due within the threshold, not in the debrief.
     for tail, info in work_order["tails"].items():
@@ -265,4 +268,16 @@ def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAY
                 unnecessary.append({"tail": tail, "service": code,
                                     "detail": "serviced but not due on the work order"})
 
-    return {"missed": missed, "unnecessary": unnecessary}
+    # 3) OFF WORK ORDER: a tail that was debriefed (serviced) but isn't on the
+    #    work order's roster at all — a plane worked that wasn't on the shift's
+    #    work order. Guarded on a populated roster so an empty/degenerate work
+    #    order can't flag every debriefed tail.
+    if work_order.get("on_shift"):
+        for tail, services in debrief_services_by_tail.items():
+            if services and tail not in work_order["on_shift"]:
+                off_work_order.append({"tail": tail,
+                                       "services": sorted(services),
+                                       "detail": "debriefed but not on the work order"})
+
+    return {"missed": missed, "unnecessary": unnecessary,
+            "off_work_order": off_work_order}
