@@ -1813,6 +1813,18 @@ WO_KEY_FLEET = {"envoy": "Envoy", "regional": "Regional", "ultra": "Ultra",
                 "frontier": "Frontier", "psa": "PSA", "gojet": "GoJet",
                 "mesa": "Mesa", "breeze": "Breeze", "jsx": "JSX"}
 
+# Rollout gate. While False (default), the reconciler runs only the ARRIVAL CHECK:
+# per closeout it emails WORKORDER_CHECK_RECIPIENTS whether that location's work
+# order came through and is valid — no missed/unnecessary/off findings in the
+# closeout email and no Closeout Compare worksheet writes. Flip to true to enable
+# the full analysis once teams are reliably uploading the right file.
+WORKORDER_FINDINGS_ENABLED = os.environ.get(
+    "WORKORDER_FINDINGS_ENABLED", "false").lower() == "true"
+# Who gets the interim arrival-check email (just Sam by default).
+WORKORDER_CHECK_RECIPIENTS = [e.strip() for e in os.environ.get(
+    "WORKORDER_CHECK_RECIPIENTS", "samuel.kosco@foxtrotaviation.com").split(",")
+    if e.strip()]
+
 
 def _wo_urls(value):
     """A '<fleet>_wo' payload value -> list of URLs. Accepts a bare URL string, a
@@ -2043,6 +2055,73 @@ def write_work_order_findings(findings, loc, date):
         print(f"\n[work-order workbook write failed: {e}]", flush=True)
 
 
+def work_order_arrival_report(body):
+    """Interim rollout check (no debrief needed): for each work-order key in the
+    payload ('wo' or '<fleet>_wo'), report whether a valid work order arrived.
+    Returns [{fleet, status, detail}] with status in valid/invalid/missing."""
+    entries = []
+    for key, value in body.items():
+        k = str(key).lower()
+        if k == "wo":
+            prefix = ""
+        elif k.endswith("_wo"):
+            prefix = k[:-3]
+        else:
+            continue
+        hint = WO_KEY_FLEET.get(prefix) or (prefix.upper() or None)
+        urls = _wo_urls(value)
+        if not urls:
+            entries.append({"fleet": hint, "status": "missing",
+                            "detail": "no work order uploaded"})
+            continue
+        for url in urls:
+            parsed = work_order.parse_work_order(_download_work_order_text(url) or "")
+            fname = url.rstrip("/").rsplit("/", 1)[-1][:70]
+            if work_order.is_work_order(parsed):
+                entries.append({"fleet": parsed.get("fleet") or hint or "?",
+                                "status": "valid", "detail": fname})
+            else:
+                entries.append({"fleet": hint or "?", "status": "invalid",
+                                "detail": f"not a work order ({fname})"})
+    return entries
+
+
+def send_work_order_arrival_email(location, date, entries):
+    """Email the interim arrival check to WORKORDER_CHECK_RECIPIENTS: this
+    closeout's location and whether its work order(s) came through valid."""
+    import html as _h
+    loc = (str(location or "").strip().upper()) or "(unknown)"
+    all_valid = entries and all(e["status"] == "valid" for e in entries)
+    flag = "✓ valid work order" if all_valid else "⚠ check work order"
+    subject = f"[Work Order Check] {loc} {date or ''} — {flag}"
+
+    color = {"valid": "#1a7f37", "invalid": "#b00020", "missing": "#b00020"}
+    th = ('style="text-align:left;padding:6px 12px;border:1px solid #ccc;'
+          'background:#1F3864;color:#fff;"')
+    td = 'style="padding:6px 12px;border:1px solid #ccc;"'
+    rows = "".join(
+        f'<tr><td {td}>{_h.escape(str(e.get("fleet") or "?"))}</td>'
+        f'<td {td}><b style="color:{color.get(e["status"], "#333")}">'
+        f'{e["status"].upper()}</b></td>'
+        f'<td {td}>{_h.escape(str(e.get("detail") or ""))}</td></tr>'
+        for e in entries)
+    body_html = (
+        f'<div style="font-family:Arial,sans-serif;font-size:14px;">'
+        f'<p><b>{_h.escape(loc)}</b> closeout ({_h.escape(str(date or ""))}) — '
+        f'work order arrival check.</p>'
+        f'<table style="border-collapse:collapse;font-family:Arial,sans-serif;'
+        f'font-size:13px;"><tr><th {th}>Program</th><th {th}>Work Order</th>'
+        f'<th {th}>Detail</th></tr>{rows}</table>'
+        f'<p style="color:#888;font-size:11px;margin-top:14px;">Interim rollout '
+        f'check — confirms the right file is being uploaded. The full '
+        f'work-order/debrief comparison is not running yet.</p></div>')
+    send_email_via_graph({"subject": subject, "body": body_html,
+                          "content_type": "HTML", "to": WORKORDER_CHECK_RECIPIENTS,
+                          "from": EMAIL_FROM})
+    print(f"\n[work order arrival email sent to {', '.join(WORKORDER_CHECK_RECIPIENTS)}]",
+          flush=True)
+
+
 def main():
     body = _load_payload()
 
@@ -2080,21 +2159,34 @@ def main():
         _record_closeout_submission(report.get("location"), report.get("date"),
                                     report.get("submitter"))
 
-    # Work-order check: parse each uploaded work order (payload '<fleet>_wo' keys)
-    # and cross-reference the debrief. Best-effort — a failure here never blocks
-    # the discrepancy email/records.
+    send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
+
+    # Work-order check. Default (rollout): ARRIVAL CHECK only — email Sam whether
+    # this closeout's work order came through valid; no findings section, no
+    # workbook writes. With WORKORDER_FINDINGS_ENABLED=true: the full analysis
+    # (missed/unnecessary/off/invalid) feeds the email section + Closeout Compare
+    # worksheet. Best-effort — never blocks the discrepancy email/records.
     wo_findings = []
     try:
-        _co = extract_closeout(body)          # for the parsed date object + location
-        wo_findings = collect_work_order_findings(body, _co["location"], _co["date"])
+        _co = extract_closeout(body)          # parsed date object + location
+        if WORKORDER_FINDINGS_ENABLED:
+            wo_findings = collect_work_order_findings(body, _co["location"], _co["date"])
+            if wo_findings:
+                print(f"\n----- WORK ORDER FINDINGS ({len(wo_findings)}) -----", flush=True)
+                for f in wo_findings:
+                    print(json.dumps(f), flush=True)
+        else:
+            arrivals = work_order_arrival_report(body)
+            if arrivals:
+                print(f"\n----- WORK ORDER ARRIVAL CHECK ({len(arrivals)}) -----", flush=True)
+                for a in arrivals:
+                    print(json.dumps(a), flush=True)
+                if send_on:
+                    send_work_order_arrival_email(_co["location"], _co.get("date"), arrivals)
+                else:
+                    print("[SEND_EMAIL=false — arrival email not sent]", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"\n[work order check failed: {e}]", flush=True)
-    if wo_findings:
-        print(f"\n----- WORK ORDER FINDINGS ({len(wo_findings)}) -----", flush=True)
-        for f in wo_findings:
-            print(json.dumps(f), flush=True)
-
-    send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
 
     if report.get("has_discrepancies"):
         # Deterministic by default (no API). Only when USE_AI_DISCREPANCY_EMAIL is
