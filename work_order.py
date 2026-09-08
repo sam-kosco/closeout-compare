@@ -247,6 +247,69 @@ def is_work_order(parsed):
     return bool(parsed.get("is_work_order"))
 
 
+def from_snapshot(snap, fleet=None):
+    """Build the SAME structured dict parse_work_order() returns, but from a
+    client-side work-order SNAPSHOT instead of extracted PDF text.
+
+    When a tracker generates a work order it also POSTs a JSON snapshot of it to
+    the work-order store, keyed by the QR's unique `woId`. A closeout done on a
+    phone can then upload a *photo of the QR* rather than the PDF; the reconciler
+    decodes the woId, fetches this snapshot, and runs the same evaluate() on it —
+    no PDF/OCR round trip. The snapshot carries the SAME human-readable service
+    names the PDF prints, so service→code canonicalization runs through
+    canon_service() here too: the QR-fetch path and the PDF-parse path produce
+    identical structured data (and honor the same per-fleet overrides).
+
+    Snapshot shape (JSON, so lists rather than sets/dicts):
+        {"program"/"fleet": "Envoy", "date": "YYYY-MM-DD",
+         "onShift": ["N203NN", …],
+         "tails": [{"tail": "N203NN", "station": "XNA",
+                    "overdue":  [{"name": "Exterior Detail 2", "days": 4}],
+                    "dueSoon":  [{"name": "Carpet Extraction", "days": 3}],
+                    "never":    ["Interior Clean"]}]}
+
+    A "never" (never-serviced) job is folded into `overdue` with a large day
+    count, so it is treated as a missed priority when it isn't in the debrief.
+    """
+    fleet = fleet or snap.get("fleet") or snap.get("program")
+    date = None
+    ds = snap.get("date")
+    if ds:
+        try:
+            date = datetime.date.fromisoformat(str(ds)[:10])
+        except ValueError:
+            date = None
+    tails, on_shift, unknown = {}, set(), []
+
+    def _add(entry, bucket, name, days):
+        code = canon_service(name, fleet)
+        if code is None:
+            unknown.append(str(name or ""))
+            return
+        entry[bucket][code] = int(days or 0)
+
+    for t in (snap.get("tails") or []):
+        tail = str(t.get("tail") or "").strip().upper()
+        if not tail:
+            continue
+        on_shift.add(tail)
+        entry = tails.setdefault(tail, {"station": (t.get("station") or None),
+                                        "overdue": {}, "due_soon": {}})
+        for item in (t.get("overdue") or []):
+            _add(entry, "overdue", item.get("name"), item.get("days"))
+        for name in (t.get("never") or []):
+            _add(entry, "overdue", name, 9999)      # never serviced -> maximally overdue
+        for item in (t.get("dueSoon") or []):
+            _add(entry, "due_soon", item.get("name"), item.get("days"))
+
+    for tail in (snap.get("onShift") or []):
+        on_shift.add(str(tail).strip().upper())
+
+    return {"fleet": fleet, "date": date, "tails": tails,
+            "on_shift": on_shift, "unknown_services": unknown,
+            "is_work_order": True}
+
+
 def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAYS):
     """Cross-reference a parsed work order against the debrief.
 
@@ -270,9 +333,13 @@ def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAY
         done = dserv(tail)
         for code, days in info["overdue"].items():
             if code not in done:
+                # A large sentinel (from a snapshot's "never serviced" job) reads
+                # as never-serviced rather than an absurd day count.
+                never = days >= 9000
                 missed.append({"tail": tail, "service": code,
-                               "priority": f"{days} days overdue",
-                               "detail": f"overdue {days}d, not debriefed"})
+                               "priority": "never serviced" if never else f"{days} days overdue",
+                               "detail": "never serviced, not debriefed" if never
+                                         else f"overdue {days}d, not debriefed"})
         for code, days in info["due_soon"].items():
             if days <= due_soon_days and code not in done:
                 missed.append({"tail": tail, "service": code,

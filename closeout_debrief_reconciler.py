@@ -1828,6 +1828,16 @@ WORKORDER_CHECK_RECIPIENTS = [e.strip() for e in os.environ.get(
     "WORKORDER_CHECK_RECIPIENTS", "samuel.kosco@foxtrotaviation.com").split(",")
     if e.strip()]
 
+# QR-photo path. A work order is often built on a laptop but the closeout is done
+# on a phone, so instead of the PDF the closeout may upload a PHOTO of the work
+# order's QR code. When a tracker generates a work order it POSTs a JSON SNAPSHOT
+# of it (keyed by the QR's unique woId) to a Power Automate flow that writes it
+# under WO_STORE_PREFIX on the Data Hub. The reconciler decodes the woId from the
+# photo and fetches that snapshot — no PDF/OCR round trip. Snapshots are pruned
+# after WO_STORE_RETENTION_DAYS (Sam: fine to delete after ~2 months).
+WO_STORE_PREFIX = os.environ.get("WO_STORE_PREFIX", "Monitoring/WorkOrders")
+WO_STORE_RETENTION_DAYS = int(os.environ.get("WO_STORE_RETENTION_DAYS", "60"))
+
 
 def _wo_urls(value):
     """A '<fleet>_wo' payload value -> list of URLs. Accepts a bare URL string, a
@@ -1854,23 +1864,172 @@ def _wo_urls(value):
     return urls
 
 
-def _download_work_order_text(url):
-    """Download a work-order PDF (unauthenticated) and extract its text with
-    pypdf. Returns the text, or None if it can't be fetched/read."""
+def _download_work_order_bytes(url):
+    """Download an uploaded work-order file (unauthenticated JotForm URL). Returns
+    (content_bytes, content_type) or (None, None)."""
     import requests
+    try:
+        r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        return r.content, r.headers.get("Content-Type", "")
+    except Exception as e:  # noqa: BLE001 — surface as an invalid/unreadable finding
+        print(f"[work order download failed ({url[:70]}…): {e}]", flush=True)
+        return None, None
+
+
+def _pdf_text(content):
+    """Extract text from PDF bytes with pypdf. None if pypdf is missing/unreadable."""
     try:
         from pypdf import PdfReader
     except ImportError:
         print("[pypdf not installed — cannot parse work orders]", flush=True)
         return None
     try:
-        r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        reader = PdfReader(io.BytesIO(r.content))
+        reader = PdfReader(io.BytesIO(content))
         return "\n".join((pg.extract_text() or "") for pg in reader.pages)
-    except Exception as e:  # noqa: BLE001 — surface as an invalid/unreadable finding
-        print(f"[work order download/extract failed ({url[:70]}…): {e}]", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[work order PDF extract failed: {e}]", flush=True)
         return None
+
+
+def _download_work_order_text(url):
+    """PDF-only convenience wrapper: download + extract text (or None)."""
+    content, _ct = _download_work_order_bytes(url)
+    return _pdf_text(content) if content is not None else None
+
+
+def _sanitize_woid(val):
+    """Keep only the filename-safe characters of a decoded woId (the store key is
+    '<woId>.json'). Underscore/hyphen/dot allowed; colons and noise dropped."""
+    return re.sub(r"[^A-Za-z0-9_.\-]", "", str(val or ""))[:120]
+
+
+def _decode_qr_woid(image_bytes):
+    """Decode a PHOTO of a work-order QR code to its woId string, or None.
+
+    Best-effort and defensive about phone photos (rotation, low contrast, size):
+    honors EXIF orientation, tries autocontrast, and upscales small images before
+    handing them to pyzbar. Requires pyzbar (+ the system libzbar0 the workflow
+    apt-installs) and Pillow; pillow-heif is registered when present so iPhone
+    HEIC uploads decode too. A decode that isn't a work-order QR is ignored."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        print("[Pillow not installed — cannot decode QR image]", flush=True)
+        return None
+    try:
+        from pyzbar.pyzbar import decode as _zbar_decode
+    except Exception as e:  # noqa: BLE001 — missing lib or libzbar0
+        print(f"[pyzbar unavailable — cannot decode QR image: {e}]", flush=True)
+        return None
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:  # noqa: BLE001 — HEIC just won't be supported
+        pass
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+    except Exception as e:  # noqa: BLE001
+        print(f"[could not open uploaded image: {e}]", flush=True)
+        return None
+
+    gray = ImageOps.exif_transpose(img).convert("L")
+    candidates = [gray, ImageOps.autocontrast(gray)]
+    w, h = gray.size
+    if max(w, h) < 1600:                      # zbar wants reasonably large modules
+        f = 1600.0 / max(w, h)
+        candidates.append(gray.resize((int(w * f), int(h * f))))
+    for im in candidates:
+        try:
+            results = _zbar_decode(im)
+        except Exception:  # noqa: BLE001
+            continue
+        for res in results:
+            val = (res.data or b"").decode("utf-8", "ignore").strip()
+            if val.upper().startswith(("WO_", "WO:")):
+                return _sanitize_woid(val)
+    return None
+
+
+def _fetch_work_order_snapshot(woid):
+    """Fetch a stored work-order snapshot JSON by its woId (None if not found)."""
+    return _graph_get_json(f"{WO_STORE_PREFIX}/{woid}.json")
+
+
+def _work_order_from_url(url, hint=None):
+    """Resolve one uploaded work-order file to a parsed work order, whether it is
+    the PDF itself or a PHOTO of the work order's QR code.
+
+    Returns (parsed, err): `parsed` is the same dict shape parse_work_order() /
+    from_snapshot() produce (or None), and `err` is a short human reason when it
+    can't be resolved (fuels the 'invalid work order' finding)."""
+    content, ctype = _download_work_order_bytes(url)
+    if content is None:
+        return None, "could not download the uploaded file"
+    # PDF (laptop upload) -> extract + parse the same as before.
+    if content[:5] == b"%PDF-" or "pdf" in (ctype or "").lower():
+        parsed = work_order.parse_work_order(_pdf_text(content) or "")
+        if not work_order.is_work_order(parsed):
+            return None, "uploaded file is not a valid work order"
+        return parsed, None
+    # Otherwise treat it as an image of the QR code (phone upload).
+    woid = _decode_qr_woid(content)
+    if not woid:
+        return None, "uploaded image has no readable work-order QR code"
+    snap = _fetch_work_order_snapshot(woid)
+    if not snap:
+        return None, f"work order {woid} was not found in the store"
+    return work_order.from_snapshot(snap, hint), None
+
+
+def _prune_work_order_store():
+    """Delete work-order snapshots older than WO_STORE_RETENTION_DAYS. Best-effort
+    and gated to at most once per UTC day via a marker file, so it doesn't scan on
+    every closeout. Sam: snapshots may be deleted after ~2 months."""
+    import requests
+    if not GRAPH_DRIVE_ID:
+        return
+    marker = f"{WO_STORE_PREFIX}/_last_prune.json"
+    today = datetime.date.today().isoformat()
+    if (_graph_get_json(marker) or {}).get("date") == today:
+        return
+    try:
+        enc = "/".join(requests.utils.quote(s) for s in WO_STORE_PREFIX.split("/"))
+        url = (f"https://graph.microsoft.com/v1.0/drives/{GRAPH_DRIVE_ID}"
+               f"/root:/{enc}:/children?$select=id,name,lastModifiedDateTime&$top=200")
+        hdrs = {"Authorization": f"Bearer {_graph_token()}"}
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(days=WO_STORE_RETENTION_DAYS))
+        deleted = 0
+        while url:
+            r = requests.get(url, headers=hdrs, timeout=30)
+            if r.status_code == 404:
+                return  # store folder doesn't exist yet — nothing to prune
+            r.raise_for_status()
+            data = r.json()
+            for it in data.get("value", []):
+                nm = it.get("name", "")
+                if not nm.endswith(".json") or nm.startswith("_"):
+                    continue
+                try:
+                    when = datetime.datetime.fromisoformat(
+                        it.get("lastModifiedDateTime", "").replace("Z", "+00:00"))
+                except Exception:  # noqa: BLE001
+                    continue
+                if when < cutoff:
+                    d = requests.delete(
+                        f"https://graph.microsoft.com/v1.0/drives/{GRAPH_DRIVE_ID}"
+                        f"/items/{it['id']}", headers=hdrs, timeout=30)
+                    if d.status_code in (200, 204):
+                        deleted += 1
+            url = data.get("@odata.nextLink")
+        _graph_put_json(marker, {"date": today, "deleted": deleted})
+        if deleted:
+            print(f"\n[work-order store: pruned {deleted} snapshot(s) older than "
+                  f"{WO_STORE_RETENTION_DAYS}d]", flush=True)
+    except Exception as e:  # noqa: BLE001 — best-effort; never fail the run
+        print(f"[work-order store prune failed: {e}]", flush=True)
 
 
 def _debrief_serviced_by_tail(fleet, loc, date):
@@ -1916,15 +2075,14 @@ def collect_work_order_findings(body, loc, date):
             continue
         hint = WO_KEY_FLEET.get(prefix) or (prefix.upper() or None)
         for url in _wo_urls(value):
-            text = _download_work_order_text(url)
-            parsed = work_order.parse_work_order(text or "")
-            fleet = parsed.get("fleet") or hint or "unknown"
-            if not work_order.is_work_order(parsed):
+            parsed, err = _work_order_from_url(url, hint)   # PDF or QR-photo
+            if parsed is None:
                 fname = url.rstrip("/").rsplit("/", 1)[-1][:60]
-                findings.append({"fleet": fleet, "type": "invalid", "tail": None,
-                                 "service": None,
-                                 "detail": f"uploaded file is not a valid work order ({fname})"})
+                findings.append({"fleet": hint or "unknown", "type": "invalid",
+                                 "tail": None, "service": None,
+                                 "detail": f"{err} ({fname})"})
                 continue
+            fleet = parsed.get("fleet") or hint or "unknown"
             try:
                 db = _debrief_serviced_by_tail(fleet, loc, date)
             except Exception as e:  # noqa: BLE001
@@ -2080,14 +2238,14 @@ def work_order_arrival_report(body):
         saw_key = True
         hint = WO_KEY_FLEET.get(prefix) or (prefix.upper() or None)
         for url in _wo_urls(value):        # empty/blank keys contribute nothing
-            parsed = work_order.parse_work_order(_download_work_order_text(url) or "")
+            parsed, err = _work_order_from_url(url, hint)   # PDF or QR-photo
             fname = url.rstrip("/").rsplit("/", 1)[-1][:70]
-            if work_order.is_work_order(parsed):
+            if parsed is not None:
                 entries.append({"fleet": parsed.get("fleet") or hint or "?",
                                 "status": "valid", "detail": fname})
             else:
                 entries.append({"fleet": hint or "?", "status": "invalid",
-                                "detail": f"not a work order ({fname})"})
+                                "detail": f"{err} ({fname})"})
     if saw_key and not entries:
         entries.append({"fleet": None, "status": "missing",
                         "detail": "no work order uploaded for this closeout"})
@@ -2175,6 +2333,10 @@ def main():
     # (missed/unnecessary/off/invalid) feeds the email section + Closeout Compare
     # worksheet. Best-effort — never blocks the discrepancy email/records.
     wo_findings = []
+    try:
+        _prune_work_order_store()             # daily-gated retention sweep (best-effort)
+    except Exception as e:  # noqa: BLE001
+        print(f"\n[work-order store prune skipped: {e}]", flush=True)
     try:
         _co = extract_closeout(body)          # parsed date object + location
         if WORKORDER_FINDINGS_ENABLED:

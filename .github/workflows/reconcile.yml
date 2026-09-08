@@ -44,6 +44,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # libzbar0 is the native library pyzbar binds to for decoding QR photos
+      # (the phone-upload path where a closeout submits a picture of the work
+      # order's QR instead of the PDF). pip alone can't provide it.
+      - name: Install libzbar0 (QR decoding)
+        run: sudo apt-get update && sudo apt-get install -y libzbar0
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
