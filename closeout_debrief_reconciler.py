@@ -1792,13 +1792,16 @@ def _send_iah_dispatch(body):
 
 
 # ----- WORK ORDER COMPLIANCE CHECK -------------------------------------------
-# Closeouts upload their nightly work order (a PDF from the compliance trackers).
-# The payload key is a bare "wo" on the GENERAL Commercial Closeout 2.0 (one work
-# order; its fleet comes from the PDF header), or a per-fleet "<fleet>_wo" (e.g.
-# envoy_wo) on the location-specific closeouts (prefix names the fleet). The value
-# is the file URL (a JotForm upload URL, fetchable unauthenticated). work_order.py
-# parses it and cross-references the debrief; findings go in the email and on a
-# SEPARATE worksheet of the Closeout Compare workbook (not the true-discrepancy sheet).
+# Closeouts upload their nightly work order (a PDF from the compliance trackers)
+# under per-fleet payload keys "<fleet>_wo". The GENERAL Commercial Closeout 2.0
+# carries all four program keys — psa_wo / envoy_wo / mesa_wo / gojet_wo — of which
+# only the location's program(s) are filled (an empty key = program not run there,
+# not a miss). Location-specific closeouts carry their own fleet's key(s) (e.g. DFW
+# envoy_wo). The key prefix names the fleet (WO_KEY_FLEET) and the PDF header
+# confirms it. (A bare "wo" is also accepted, fleet taken from the PDF header.)
+# The value is the file URL (a JotForm upload URL, fetchable unauthenticated).
+# work_order.py parses it and cross-references the debrief; findings go in the
+# email and on a SEPARATE worksheet of the Closeout Compare workbook.
 
 WORKORDER_COMPARE_SP_PATH = os.environ.get(
     "WORKORDER_COMPARE_SP_PATH", "Power Flows/Debriefs/Closeout Compare.xlsx")
@@ -2056,10 +2059,16 @@ def write_work_order_findings(findings, loc, date):
 
 
 def work_order_arrival_report(body):
-    """Interim rollout check (no debrief needed): for each work-order key in the
-    payload ('wo' or '<fleet>_wo'), report whether a valid work order arrived.
-    Returns [{fleet, status, detail}] with status in valid/invalid/missing."""
+    """Interim rollout check (no debrief needed): for each FILLED work-order key in
+    the payload ('wo' or '<fleet>_wo'), report whether a valid work order arrived.
+    Returns [{fleet, status, detail}] with status in valid/invalid/missing.
+
+    The general closeout carries all four program keys (psa_wo/envoy_wo/mesa_wo/
+    gojet_wo) but only the location's program(s) are filled, so an EMPTY key is
+    "not applicable here", not a miss — empty keys are skipped. A genuine miss is
+    reported only when work-order keys were present but NONE carried a file."""
     entries = []
+    saw_key = False
     for key, value in body.items():
         k = str(key).lower()
         if k == "wo":
@@ -2068,13 +2077,9 @@ def work_order_arrival_report(body):
             prefix = k[:-3]
         else:
             continue
+        saw_key = True
         hint = WO_KEY_FLEET.get(prefix) or (prefix.upper() or None)
-        urls = _wo_urls(value)
-        if not urls:
-            entries.append({"fleet": hint, "status": "missing",
-                            "detail": "no work order uploaded"})
-            continue
-        for url in urls:
+        for url in _wo_urls(value):        # empty/blank keys contribute nothing
             parsed = work_order.parse_work_order(_download_work_order_text(url) or "")
             fname = url.rstrip("/").rsplit("/", 1)[-1][:70]
             if work_order.is_work_order(parsed):
@@ -2083,6 +2088,9 @@ def work_order_arrival_report(body):
             else:
                 entries.append({"fleet": hint or "?", "status": "invalid",
                                 "detail": f"not a work order ({fname})"})
+    if saw_key and not entries:
+        entries.append({"fleet": None, "status": "missing",
+                        "detail": "no work order uploaded for this closeout"})
     return entries
 
 
