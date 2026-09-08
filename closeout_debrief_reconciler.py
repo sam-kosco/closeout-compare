@@ -1792,11 +1792,13 @@ def _send_iah_dispatch(body):
 
 
 # ----- WORK ORDER COMPLIANCE CHECK -------------------------------------------
-# Closeouts upload their nightly work order (a PDF from the compliance trackers)
-# under a per-fleet payload key "<fleet>_wo" (e.g. envoy_wo), value = the file URL
-# (a JotForm upload URL, fetchable unauthenticated). work_order.py parses it and
-# cross-references the debrief; findings go in the email and on a SEPARATE
-# worksheet of the Closeout Compare workbook (not the true-discrepancy sheet).
+# Closeouts upload their nightly work order (a PDF from the compliance trackers).
+# The payload key is a bare "wo" on the GENERAL Commercial Closeout 2.0 (one work
+# order; its fleet comes from the PDF header), or a per-fleet "<fleet>_wo" (e.g.
+# envoy_wo) on the location-specific closeouts (prefix names the fleet). The value
+# is the file URL (a JotForm upload URL, fetchable unauthenticated). work_order.py
+# parses it and cross-references the debrief; findings go in the email and on a
+# SEPARATE worksheet of the Closeout Compare workbook (not the true-discrepancy sheet).
 
 WORKORDER_COMPARE_SP_PATH = os.environ.get(
     "WORKORDER_COMPARE_SP_PATH", "Power Flows/Debriefs/Closeout Compare.xlsx")
@@ -1887,14 +1889,21 @@ def collect_work_order_findings(body, loc, date):
     type in {missed, unnecessary, off_work_order, invalid}. Best-effort."""
     findings = []
     for key, value in body.items():
-        if not str(key).lower().endswith("_wo"):
+        k = str(key).lower()
+        # The general Commercial Closeout 2.0 sends a bare 'wo' (one work order,
+        # fleet taken from the PDF header). Location-specific closeouts send a
+        # per-fleet '<fleet>_wo' (e.g. envoy_wo), where the prefix names the fleet.
+        if k == "wo":
+            prefix = ""
+        elif k.endswith("_wo"):
+            prefix = k[:-3]
+        else:
             continue
-        prefix = str(key)[:-3].lower()
-        hint = WO_KEY_FLEET.get(prefix, prefix.upper())
+        hint = WO_KEY_FLEET.get(prefix) or (prefix.upper() or None)
         for url in _wo_urls(value):
             text = _download_work_order_text(url)
             parsed = work_order.parse_work_order(text or "")
-            fleet = parsed.get("fleet") or hint
+            fleet = parsed.get("fleet") or hint or "unknown"
             if not work_order.is_work_order(parsed):
                 fname = url.rstrip("/").rsplit("/", 1)[-1][:60]
                 findings.append({"fleet": fleet, "type": "invalid", "tail": None,
