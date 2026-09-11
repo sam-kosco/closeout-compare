@@ -2055,6 +2055,7 @@ def _canon_work_order(parsed, fleet):
     out = dict(parsed)
     out["tails"] = tails
     out["on_shift"] = on_shift
+    out["fleet"] = fleet          # resolved fleet -> evaluate scopes tracked services to it
     return out
 
 

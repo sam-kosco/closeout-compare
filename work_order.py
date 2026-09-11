@@ -79,16 +79,37 @@ FLEET_SERVICE_OVERRIDES = {
     },
 }
 
-# Canonical codes the work order / trackers manage on a DUE-DATE cycle — used to
-# EXCLUDE untracked services from the "unnecessary work" check ("exclude the jobs
-# not tracked for compliance"). Union of the global map and every fleet override,
-# minus RON and Biohazard: both are event-driven (RON = remained overnight;
-# Biohazard = as-needed), never carry a due date, and never appear as "due" on a
-# work order, so a debriefed RON/Biohazard must not be flagged as unnecessary.
-# Non-cycle Mesa codes (EC/FCD/ESS/Flight Deck) aren't in the vocabulary at all.
-TRACKED_SERVICES = (set(WORKORDER_SERVICE_MAP.values())
-                    | {v for m in FLEET_SERVICE_OVERRIDES.values() for v in m.values()}
-                    ) - {"RON", "Biohazard"}
+# Compliance-cycle services PER FLEET — the codes each tracker actually manages on
+# a DUE-DATE cycle, and therefore can list as "due"/"overdue" on a work order.
+# This scopes the "unnecessary work" check ("serviced but not due"): a debriefed
+# service is only judged unnecessary if it's a cycle service FOR THAT FLEET.
+#
+# "Tracked" is per-fleet, not global — the old global set (whole service map minus
+# RON/Biohazard) wrongly flagged routine/info-only services as unnecessary:
+#   * simple Interior Clean (I) / Exterior Clean (Ex) — routine, never on a cycle,
+#     so a debriefed clean false-flagged every time (Sam, 2026-09-11, GSP/PSA);
+#   * PSA ED3/ED4 and IHC are info-only (only Mesa puts IHC on a cycle);
+#   * RON / Biohazard / EC / ESS / FCD are event-driven, never "due".
+# A code belongs here ONLY IF canon_service() can also emit it from a work order —
+# a code the parser can't produce would never be in a tail's due set and would
+# false-flag every time (e.g. Mesa "Flight Deck" has no work-order vocabulary yet,
+# so it is intentionally omitted until the tracker's label is mapped).
+FLEET_TRACKED_SERVICES = {
+    "Envoy": {"ED1", "ED2"},
+    "PSA":   {"CC", "DSC", "CE", "ED1", "ED2", "LAV"},
+    "Mesa":  {"IHC", "ED", "DSC", "CE"},
+    "GoJet": {"ED1", "ED2", "CE"},
+    "JSX":   {"Interior Detail", "Exterior Detail", "Carpet Extraction"},
+}
+# Fallback for a fleet with no explicit set: the union of all cycle services. It
+# still excludes every routine/event code, so it cannot reintroduce the
+# clean-flagging bug; in practice only the five fleets above generate work orders.
+_ALL_TRACKED = set().union(*FLEET_TRACKED_SERVICES.values())
+
+
+def tracked_services(fleet):
+    """Compliance-cycle service codes for a fleet (falls back to the union)."""
+    return FLEET_TRACKED_SERVICES.get(fleet, _ALL_TRACKED)
 
 _DASH = r"[—–-]"                       # em / en / hyphen
 # A tail token: 3–8 chars of letters/digits, must contain a digit. Matches full
@@ -310,19 +331,28 @@ def from_snapshot(snap, fleet=None):
             "is_work_order": True}
 
 
-def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAYS):
+def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAYS,
+             tracked=None):
     """Cross-reference a parsed work order against the debrief.
 
     debrief_services_by_tail: {canon_tail: set(canonical service codes)} — the
     debrief's serviced jobs for the work order's fleet/date/location (what the
     reconciler already loads per fleet). Tails are upper/stripped.
 
+    tracked: the compliance-cycle service codes to consider for the "unnecessary
+    work" check. Defaults to this fleet's set (tracked_services(work_order fleet)),
+    so routine/info-only services (simple cleans, RON, Biohazard, PSA IHC/ED3/ED4)
+    are never flagged. Pass an explicit set to override.
+
     Returns three lists of findings (each a dict with tail and a human-readable
     detail; the per-service lists also carry `service`):
       missed         — overdue or due-<=due_soon_days jobs absent from the debrief
-      unnecessary    — debriefed tracked services the work order didn't have due
+      unnecessary    — debriefed cycle services the work order didn't have due
       off_work_order — a tail that was debriefed but isn't on the work order at all
     """
+    if tracked is None:
+        tracked = tracked_services(work_order.get("fleet"))
+
     def dserv(tail):
         return {s for s in debrief_services_by_tail.get(tail, set())}
 
@@ -353,7 +383,7 @@ def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAY
         info = work_order["tails"].get(tail, {"overdue": {}, "due_soon": {}})
         due_codes = set(info.get("overdue", {})) | set(info.get("due_soon", {}))
         for code in dserv(tail):
-            if code in TRACKED_SERVICES and code not in due_codes:
+            if code in tracked and code not in due_codes:
                 unnecessary.append({"tail": tail, "service": code,
                                     "detail": "serviced but not due on the work order"})
 
