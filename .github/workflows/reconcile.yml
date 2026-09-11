@@ -76,6 +76,16 @@ jobs:
           # Pull debriefs from SharePoint via Graph (not local files)
           DEBRIEF_SOURCE: graph
           SEND_EMAIL: "true"
+          # Full work-order analysis ON (2026-09-11): the closeout email now
+          # carries missed / unnecessary / off-work-order / invalid findings (with
+          # a link to each reviewed work order) and the "Work Order Findings"
+          # worksheet is written — no longer just the upload-arrival check. Set to
+          # "false" to fall back to the arrival check only.
+          WORKORDER_FINDINGS_ENABLED: "true"
+          # Recipients of the closeout / discrepancy emails. Sam is added
+          # TEMPORARILY (2026-09-11) to monitor the new work-order analysis —
+          # remove his address to revert to Clara + Maren only.
+          EMAIL_TO: "clara.lana@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com,samuel.kosco@foxtrotaviation.com"
           # Power Automate "When an HTTP request is received" flow that appends
           # each discrepancy to the compliance Excel table. Stored as a secret
           # because the URL carries its own SAS signature. If unset, discrepancy
