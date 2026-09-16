@@ -1807,7 +1807,7 @@ WORKORDER_COMPARE_SP_PATH = os.environ.get(
     "WORKORDER_COMPARE_SP_PATH", "Power Flows/Debriefs/Closeout Compare.xlsx")
 WORKORDER_SHEET = os.environ.get("WORKORDER_SHEET", "Work Order Findings")
 WORKORDER_HEADERS = ["Location", "Tail", "Date", "Program", "Finding", "Service",
-                     "Detail", "Status", "Notes", "Comp Anlyst"]
+                     "Detail", "Work Order", "Status", "Notes", "Comp Anlyst"]
 WO_FINDING_LABEL = {"missed": "Missed priority", "unnecessary": "Unnecessary",
                     "off_work_order": "Off work order", "invalid": "Invalid work order"}
 # Power Automate "When an HTTP request is received" flow that appends each
@@ -1828,6 +1828,7 @@ _WO_REC_PROGRAM  = "Program"
 _WO_REC_FINDING  = "Finding"
 _WO_REC_SERVICE  = "Service"
 _WO_REC_DETAIL   = "Detail"
+_WO_REC_URL      = "Work Order"   # link to the uploaded work order this finding came from
 
 # "<fleet>_wo" key prefix -> reconciler fleet.
 WO_KEY_FLEET = {"envoy": "Envoy", "regional": "Regional", "ultra": "Ultra",
@@ -2240,7 +2241,7 @@ def write_work_order_findings(findings, loc, date):
     date_str = str(date)
     rows = [[loc_base, f.get("tail") or "", date_str, f.get("fleet") or "",
              WO_FINDING_LABEL.get(f["type"], f["type"]), f.get("service") or "",
-             f.get("detail") or "", "", "", ""] for f in findings]
+             f.get("detail") or "", "", "", "", ""] for f in findings]
     try:
         hdrs = {"Authorization": f"Bearer {_graph_token()}",
                 "Content-Type": "application/json"}
@@ -2274,12 +2275,22 @@ def write_work_order_findings(findings, loc, date):
         print(f"\n[work-order workbook write failed: {e}]", flush=True)
 
 
-def build_work_order_records(findings, loc, date):
+def build_work_order_records(findings, loc, date, sources=None):
     """Flatten work-order findings into one record per finding, keyed by the
     'Work Order Findings' worksheet columns, for the Power Automate webhook (the
-    Excel connector fills a row; Status/Notes/Comp Anlyst are left blank)."""
+    Excel connector fills a row; Status/Notes/Comp Anlyst are left blank).
+
+    Each row carries a link to the work order the finding came from — the URL of
+    the file uploaded for that finding's fleet (sources = the {fleet,url,kind}
+    list collect_work_order_findings returns), so the tracking sheet clicks
+    through to the same artifact the email links."""
     loc_base = (loc or "").strip().upper().split("-")[0]
     date_str = str(date or "")
+    url_by_fleet = {}
+    for s in (sources or []):
+        fl = s.get("fleet")
+        if fl and s.get("url") and fl not in url_by_fleet:
+            url_by_fleet[fl] = s["url"]
     return [{
         _WO_REC_LOCATION: loc_base,
         _WO_REC_TAIL:     f.get("tail") or "",
@@ -2288,6 +2299,7 @@ def build_work_order_records(findings, loc, date):
         _WO_REC_FINDING:  WO_FINDING_LABEL.get(f["type"], f["type"]),
         _WO_REC_SERVICE:  f.get("service") or "",
         _WO_REC_DETAIL:   f.get("detail") or "",
+        _WO_REC_URL:      url_by_fleet.get(f.get("fleet"), ""),
     } for f in findings]
 
 
@@ -2532,7 +2544,7 @@ def main():
     # configured, so nothing regresses before the flow is wired. Honors SEND_EMAIL.
     if wo_findings:
         if send_on:
-            wo_records = build_work_order_records(wo_findings, _co["location"], _co["date"])
+            wo_records = build_work_order_records(wo_findings, _co["location"], _co["date"], wo_sources)
             if WORKORDER_WEBHOOK_URL:
                 print(f"\n----- WORK ORDER FINDING RECORDS ({len(wo_records)}) -----", flush=True)
                 for rec in wo_records:
