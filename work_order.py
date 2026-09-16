@@ -111,6 +111,24 @@ def tracked_services(fleet):
     """Compliance-cycle service codes for a fleet (falls back to the union)."""
     return FLEET_TRACKED_SERVICES.get(fleet, _ALL_TRACKED)
 
+
+# Services a fleet performs as ROUTINE SOP regardless of the due cycle, so a
+# debriefed instance the work order didn't have "due" is EXPECTED, not unnecessary
+# work — excluded from the UNNECESSARY check only, to cut noise. PSA techs do a
+# Cockpit Clean on every RON (Sam, 2026-09-16): CC was flagged on nearly every PSA
+# debrief and buried the real findings. This does NOT touch the MISSED check — an
+# overdue/due-soon CC that wasn't debriefed is still surfaced (that path reads the
+# work order's own due list, not the tracked set).
+UNNECESSARY_EXCLUDE = {
+    "PSA": {"CC"},
+}
+
+
+def unnecessary_services(fleet):
+    """Cycle codes eligible for the 'unnecessary work' check: the fleet's tracked
+    set minus any routine-SOP exclusions."""
+    return tracked_services(fleet) - UNNECESSARY_EXCLUDE.get(fleet, set())
+
 _DASH = r"[—–-]"                       # em / en / hyphen
 # A tail token: 3–8 chars of letters/digits, must contain a digit. Matches full
 # N-numbers (N203NN, N80348) and GoJet's bare aircraft numbers (506, 536).
@@ -340,8 +358,9 @@ def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAY
     reconciler already loads per fleet). Tails are upper/stripped.
 
     tracked: the compliance-cycle service codes to consider for the "unnecessary
-    work" check. Defaults to this fleet's set (tracked_services(work_order fleet)),
-    so routine/info-only services (simple cleans, RON, Biohazard, PSA IHC/ED3/ED4)
+    work" check. Defaults to this fleet's set minus its routine-SOP exclusions
+    (unnecessary_services(work_order fleet)), so routine/info-only services (simple
+    cleans, RON, Biohazard, PSA IHC/ED3/ED4) and SOP services (PSA CC on every RON)
     are never flagged. Pass an explicit set to override.
 
     Returns three lists of findings (each a dict with tail and a human-readable
@@ -351,7 +370,7 @@ def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAY
       off_work_order — a tail that was debriefed but isn't on the work order at all
     """
     if tracked is None:
-        tracked = tracked_services(work_order.get("fleet"))
+        tracked = unnecessary_services(work_order.get("fleet"))
 
     def dserv(tail):
         return {s for s in debrief_services_by_tail.get(tail, set())}
