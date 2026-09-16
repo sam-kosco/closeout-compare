@@ -1807,7 +1807,7 @@ WORKORDER_COMPARE_SP_PATH = os.environ.get(
     "WORKORDER_COMPARE_SP_PATH", "Power Flows/Debriefs/Closeout Compare.xlsx")
 WORKORDER_SHEET = os.environ.get("WORKORDER_SHEET", "Work Order Findings")
 WORKORDER_HEADERS = ["Location", "Tail", "Date", "Program", "Finding", "Service",
-                     "Detail", "Work Order", "Status", "Notes", "Comp Anlyst"]
+                     "Detail", "Work Order Link", "Status", "Notes", "Comp Anlyst"]
 WO_FINDING_LABEL = {"missed": "Missed priority", "unnecessary": "Unnecessary",
                     "off_work_order": "Off work order", "invalid": "Invalid work order"}
 # Power Automate "When an HTTP request is received" flow that appends each
@@ -1822,7 +1822,7 @@ WORKORDER_WEBHOOK_URL = os.environ.get("WORKORDER_WEBHOOK_URL", "")
 # JSON keys for a work-order finding record (match the worksheet columns; Status /
 # Notes / Comp Anlyst stay blank for manual triage).
 _WO_REC_LOCATION = "Location"
-_WO_REC_TAIL     = "Tail"
+_WO_REC_TAIL     = "Tail Number"   # matches the PA flow trigger schema (like the discrepancy flow)
 _WO_REC_DATE     = "Date"
 _WO_REC_PROGRAM  = "Program"
 _WO_REC_FINDING  = "Finding"
