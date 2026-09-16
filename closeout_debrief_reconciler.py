@@ -1830,6 +1830,15 @@ _WO_REC_SERVICE  = "Service"
 _WO_REC_DETAIL   = "Detail"
 _WO_REC_URL      = "Work Order"   # link to the uploaded work order this finding came from
 
+# De-dup state: work-order URLs whose findings have already been written to the
+# worksheet, so a closeout RESUBMISSION (same work order — e.g. the tech re-sent
+# the closeout after fixing a debrief mismatch) doesn't relist the same
+# work-order errors. Keyed by the uploaded work-order URL (stable across a
+# resubmission; a different/corrected work order has a new URL and still posts).
+WO_POSTED_STATE_PATH = os.environ.get(
+    "WO_POSTED_STATE_PATH", "Monitoring/work_order_findings_posted.json")
+WO_POSTED_RETENTION_DAYS = int(os.environ.get("WO_POSTED_RETENTION_DAYS", "60"))
+
 # "<fleet>_wo" key prefix -> reconciler fleet.
 WO_KEY_FLEET = {"envoy": "Envoy", "regional": "Regional", "ultra": "Ultra",
                 "frontier": "Frontier", "psa": "PSA", "gojet": "GoJet",
@@ -2334,6 +2343,54 @@ def post_work_order_findings(records):
     return sent
 
 
+def _load_wo_posted():
+    """Load the work-order posted-state sidecar ({url: {...}}), best-effort."""
+    return _graph_get_json(WO_POSTED_STATE_PATH) or {}
+
+
+def _filter_unposted_wo(findings, sources, state):
+    """Drop findings whose work order was already written to the worksheet (its
+    URL is in `state`) — the resubmission guard. Returns (findings_to_post,
+    urls_being_posted). Findings whose fleet has no source URL can't be de-duped
+    and are always kept."""
+    url_by_fleet = {}
+    for s in (sources or []):
+        fl = s.get("fleet")
+        if fl and s.get("url") and fl not in url_by_fleet:
+            url_by_fleet[fl] = s["url"]
+    to_post, urls = [], set()
+    for f in findings:
+        url = url_by_fleet.get(f.get("fleet"))
+        if url and url in state:
+            continue                      # this work order's findings already posted
+        to_post.append(f)
+        if url:
+            urls.add(url)
+    return to_post, urls
+
+
+def _record_wo_posted(state, urls, loc, date):
+    """Record work-order URLs as posted (with a stamp), prune entries older than
+    the retention window, and write the sidecar back. Best-effort."""
+    if not urls:
+        return
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for u in urls:
+        state[u] = {"date": str(date or ""), "location": (loc or ""),
+                    "posted_at": now.isoformat(timespec="seconds")}
+    cutoff = now - datetime.timedelta(days=WO_POSTED_RETENTION_DAYS)
+    for u in list(state):
+        try:
+            if datetime.datetime.fromisoformat(state[u]["posted_at"]) < cutoff:
+                del state[u]
+        except Exception:  # noqa: BLE001 — keep malformed entries rather than lose the guard
+            pass
+    try:
+        _graph_put_json(WO_POSTED_STATE_PATH, state)
+    except Exception as e:  # noqa: BLE001 — best-effort
+        print(f"[work-order posted-state write failed: {e}]", flush=True)
+
+
 def work_order_arrival_report(body):
     """Interim rollout check (no debrief needed): for each FILLED work-order key in
     the payload ('wo' or '<fleet>_wo'), report whether a valid work order arrived.
@@ -2544,16 +2601,31 @@ def main():
     # configured, so nothing regresses before the flow is wired. Honors SEND_EMAIL.
     if wo_findings:
         if send_on:
-            wo_records = build_work_order_records(wo_findings, _co["location"], _co["date"], wo_sources)
-            if WORKORDER_WEBHOOK_URL:
-                print(f"\n----- WORK ORDER FINDING RECORDS ({len(wo_records)}) -----", flush=True)
-                for rec in wo_records:
-                    print(json.dumps(rec), flush=True)
-                sent = post_work_order_findings(wo_records)
-                print(f"\n[{sent}/{len(wo_records)} work-order findings posted to PA]",
-                      flush=True)
+            # Resubmission guard: don't relist a work order's findings on the
+            # worksheet if that work order (by URL) was already written. The email
+            # above still shows them every submission; only the persistent sheet
+            # is de-duped. A different/corrected work order (new URL) still posts.
+            _wo_state = _load_wo_posted()
+            _to_post, _posting_urls = _filter_unposted_wo(wo_findings, wo_sources, _wo_state)
+            _skipped = len(wo_findings) - len(_to_post)
+            if _skipped:
+                print(f"\n[work-order findings: {_skipped} row(s) skipped — work order "
+                      f"already recorded (resubmission)]", flush=True)
+            if not _to_post:
+                print("[work-order findings: nothing new to write]", flush=True)
             else:
-                write_work_order_findings(wo_findings, _co["location"], _co["date"])
+                wo_records = build_work_order_records(_to_post, _co["location"], _co["date"], wo_sources)
+                if WORKORDER_WEBHOOK_URL:
+                    print(f"\n----- WORK ORDER FINDING RECORDS ({len(wo_records)}) -----", flush=True)
+                    for rec in wo_records:
+                        print(json.dumps(rec), flush=True)
+                    sent = post_work_order_findings(wo_records)
+                    print(f"\n[{sent}/{len(wo_records)} work-order findings posted to PA]",
+                          flush=True)
+                    if sent:
+                        _record_wo_posted(_wo_state, _posting_urls, _co["location"], _co["date"])
+                else:
+                    write_work_order_findings(_to_post, _co["location"], _co["date"])
         else:
             print("\n[SEND_EMAIL=false — work-order findings drafted only, not written]",
                   flush=True)
