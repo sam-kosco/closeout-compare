@@ -91,4 +91,10 @@ jobs:
           # because the URL carries its own SAS signature. If unset, discrepancy
           # records are logged but not posted.
           DISCREPANCY_WEBHOOK_URL: ${{ secrets.DISCREPANCY_WEBHOOK_URL }}
+          # Power Automate "When an HTTP request is received" flow that appends each
+          # work-order finding to the "Work Order Findings" worksheet of Closeout
+          # Compare.xlsx (Excel "Add a row into a table"). Needed because the direct
+          # Graph workbook write is WAC-blocked app-only on this tenant. If unset,
+          # the reconciler falls back to that (failing) direct write.
+          WORKORDER_WEBHOOK_URL: ${{ secrets.WORKORDER_WEBHOOK_URL }}
         run: python closeout_debrief_reconciler.py

@@ -1810,6 +1810,24 @@ WORKORDER_HEADERS = ["Location", "Tail", "Date", "Program", "Finding", "Service"
                      "Detail", "Status", "Notes", "Comp Anlyst"]
 WO_FINDING_LABEL = {"missed": "Missed priority", "unnecessary": "Unnecessary",
                     "off_work_order": "Off work order", "invalid": "Invalid work order"}
+# Power Automate "When an HTTP request is received" flow that appends each
+# work-order finding as a row to the "Work Order Findings" worksheet of Closeout
+# Compare.xlsx (Excel connector's "Add a row into a table"). Used INSTEAD of the
+# direct Graph workbook write, which is WAC-blocked app-only on this tenant (the
+# write 403s — same reason discrepancy records go through DISCREPANCY_WEBHOOK_URL).
+# One POST per finding, body keyed by the worksheet column names. If unset, the
+# reconciler falls back to the (failing) direct write so behavior is unchanged
+# until the flow is wired.
+WORKORDER_WEBHOOK_URL = os.environ.get("WORKORDER_WEBHOOK_URL", "")
+# JSON keys for a work-order finding record (match the worksheet columns; Status /
+# Notes / Comp Anlyst stay blank for manual triage).
+_WO_REC_LOCATION = "Location"
+_WO_REC_TAIL     = "Tail"
+_WO_REC_DATE     = "Date"
+_WO_REC_PROGRAM  = "Program"
+_WO_REC_FINDING  = "Finding"
+_WO_REC_SERVICE  = "Service"
+_WO_REC_DETAIL   = "Detail"
 
 # "<fleet>_wo" key prefix -> reconciler fleet.
 WO_KEY_FLEET = {"envoy": "Envoy", "regional": "Regional", "ultra": "Ultra",
@@ -2256,6 +2274,54 @@ def write_work_order_findings(findings, loc, date):
         print(f"\n[work-order workbook write failed: {e}]", flush=True)
 
 
+def build_work_order_records(findings, loc, date):
+    """Flatten work-order findings into one record per finding, keyed by the
+    'Work Order Findings' worksheet columns, for the Power Automate webhook (the
+    Excel connector fills a row; Status/Notes/Comp Anlyst are left blank)."""
+    loc_base = (loc or "").strip().upper().split("-")[0]
+    date_str = str(date or "")
+    return [{
+        _WO_REC_LOCATION: loc_base,
+        _WO_REC_TAIL:     f.get("tail") or "",
+        _WO_REC_DATE:     date_str,
+        _WO_REC_PROGRAM:  f.get("fleet") or "",
+        _WO_REC_FINDING:  WO_FINDING_LABEL.get(f["type"], f["type"]),
+        _WO_REC_SERVICE:  f.get("service") or "",
+        _WO_REC_DETAIL:   f.get("detail") or "",
+    } for f in findings]
+
+
+def post_work_order_findings(records):
+    """POST each work-order finding to WORKORDER_WEBHOOK_URL (one row per finding,
+    mirroring post_discrepancy_records). Best-effort; returns the count accepted."""
+    import requests
+
+    if not records:
+        return 0
+    if not WORKORDER_WEBHOOK_URL:
+        print("[WORKORDER_WEBHOOK_URL not set — work-order findings not posted]",
+              flush=True)
+        return 0
+
+    sent = 0
+    for rec in records:
+        try:
+            resp = requests.post(
+                WORKORDER_WEBHOOK_URL,
+                headers={"Content-Type": "application/json"},
+                json=rec, timeout=30)
+            if resp.status_code not in (200, 201, 202):
+                print(f"[work-order finding POST failed ({resp.status_code}) for "
+                      f"{rec[_WO_REC_PROGRAM]} {rec[_WO_REC_TAIL]}: {resp.text[:200]}]",
+                      flush=True)
+                continue
+            sent += 1
+        except Exception as e:  # noqa: BLE001 — best-effort; keep posting the rest
+            print(f"[work-order finding POST error for {rec[_WO_REC_PROGRAM]} "
+                  f"{rec[_WO_REC_TAIL]}: {e}]", flush=True)
+    return sent
+
+
 def work_order_arrival_report(body):
     """Interim rollout check (no debrief needed): for each FILLED work-order key in
     the payload ('wo' or '<fleet>_wo'), report whether a valid work order arrived.
@@ -2459,11 +2525,23 @@ def main():
             print("\n[SEND_EMAIL=false — discrepancy records drafted only, not posted]",
                   flush=True)
 
-    # Work-order findings -> a SEPARATE worksheet of the Closeout Compare workbook
-    # (direct Graph write, not the discrepancy webhook). Honors SEND_EMAIL=false.
+    # Work-order findings -> the "Work Order Findings" worksheet of Closeout
+    # Compare.xlsx. Preferred path is the Power Automate webhook (one POST per
+    # finding), since the direct Graph workbook write is WAC-blocked app-only on
+    # this tenant (403). Falls back to the direct write only when no webhook URL is
+    # configured, so nothing regresses before the flow is wired. Honors SEND_EMAIL.
     if wo_findings:
         if send_on:
-            write_work_order_findings(wo_findings, _co["location"], _co["date"])
+            wo_records = build_work_order_records(wo_findings, _co["location"], _co["date"])
+            if WORKORDER_WEBHOOK_URL:
+                print(f"\n----- WORK ORDER FINDING RECORDS ({len(wo_records)}) -----", flush=True)
+                for rec in wo_records:
+                    print(json.dumps(rec), flush=True)
+                sent = post_work_order_findings(wo_records)
+                print(f"\n[{sent}/{len(wo_records)} work-order findings posted to PA]",
+                      flush=True)
+            else:
+                write_work_order_findings(wo_findings, _co["location"], _co["date"])
         else:
             print("\n[SEND_EMAIL=false — work-order findings drafted only, not written]",
                   flush=True)
