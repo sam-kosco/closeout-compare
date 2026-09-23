@@ -370,6 +370,12 @@ ULTRA_SERVICE_MAP = {
     "ULTRA CLEAN":      "Ultra",
     "SHROUD CLEANING":  "Shroud",
     "SHROUD CLEAN":     "Shroud",
+    # DFW Mainline RON (Sam, 2026-09-22): new AA mainline service, on the
+    # closeout as "American Mainline RON" (field 7), on the Ultra debrief's
+    # Service column as "Mainline RON" — both fold to one label so a
+    # matched night doesn't read as a service mismatch.
+    "MAINLINE RON":          "Mainline RON",
+    "AMERICAN MAINLINE RON": "Mainline RON",
 }
 
 
