@@ -419,3 +419,40 @@ def evaluate(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAY
 
     return {"missed": missed, "unnecessary": unnecessary,
             "off_work_order": off_work_order}
+
+
+def summarize(work_order, debrief_services_by_tail, due_soon_days=WO_DUE_SOON_DAYS):
+    """Objective nightly VOLUME for one work order vs the debrief — the
+    denominators a long-run stats dashboard needs. Deliberately NOT error counts:
+    minor/major errors, unnecessary work and missed jobs live in the findings
+    sheets with their Verdict column (a 'No Fault' verdict can retract them), so
+    those are counted from the sheets at dashboard time, not frozen here.
+
+    Counts every job the work order lists as due — that IS the fleet's tracked
+    set, since a tracker only puts its own cycle services on the work order, so
+    this matches the missed check exactly (missed = overdue/due-soon not done).
+
+        planes             on-shift tails on the work order
+        overdue_jobs       tracked jobs listed overdue (summed across tails)
+        due_soon_jobs      tracked jobs due within due_soon_days (<=5)
+        overdue_completed  of those overdue jobs, how many were debriefed
+        due_soon_completed of those due-soon jobs, how many were debriefed
+    """
+    def done(tail):
+        return debrief_services_by_tail.get(tail, set())
+
+    overdue = due_soon = od_done = ds_done = 0
+    for tail, info in work_order["tails"].items():
+        d = done(tail)
+        for code in info.get("overdue", {}):
+            overdue += 1
+            if code in d:
+                od_done += 1
+        for code, days in info.get("due_soon", {}).items():
+            if days <= due_soon_days:
+                due_soon += 1
+                if code in d:
+                    ds_done += 1
+    return {"planes": len(work_order.get("on_shift") or ()),
+            "overdue_jobs": overdue, "due_soon_jobs": due_soon,
+            "overdue_completed": od_done, "due_soon_completed": ds_done}

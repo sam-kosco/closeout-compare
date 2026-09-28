@@ -2114,9 +2114,13 @@ def collect_work_order_findings(body, loc, date):
         sources  — one {fleet, url, kind, ok} per uploaded work-order file, so the
                    discrepancy email can LINK the work order Clara/Maren are
                    reconciling against (kind = 'pdf' | 'photo').
+    Also returns `volumes` — one objective nightly-volume dict per VALID work
+    order {fleet, wo_url, planes, overdue_jobs, due_soon_jobs, overdue_completed,
+    due_soon_completed} for the long-run stats store.
     Best-effort."""
     findings = []
     sources = []
+    volumes = []
     for key, value in body.items():
         k = str(key).lower()
         # The general Commercial Closeout 2.0 sends a bare 'wo' (one work order,
@@ -2151,7 +2155,11 @@ def collect_work_order_findings(body, loc, date):
                                  "service": None,
                                  "detail": f"no debrief available to check the {fleet} work order"})
                 continue
-            res = work_order.evaluate(_canon_work_order(parsed, fleet), db)
+            cwo = _canon_work_order(parsed, fleet)
+            vol = work_order.summarize(cwo, db)
+            vol.update({"fleet": fleet, "wo_url": url})
+            volumes.append(vol)
+            res = work_order.evaluate(cwo, db)
             for m in res["missed"]:
                 findings.append({"fleet": fleet, "type": "missed", "tail": m["tail"],
                                  "service": m["service"], "detail": m["priority"]})
@@ -2162,7 +2170,7 @@ def collect_work_order_findings(body, loc, date):
                 findings.append({"fleet": fleet, "type": "off_work_order", "tail": o["tail"],
                                  "service": ", ".join(o["services"]),
                                  "detail": o["detail"]})
-    return findings, sources
+    return findings, sources, volumes
 
 
 def build_work_order_section_html(findings, sources=None):
@@ -2482,6 +2490,53 @@ def send_work_order_arrival_email(location, date, entries):
           flush=True)
 
 
+# Long-run per-location nightly stats sidecar — OBJECTIVE volume only (planes,
+# tracked overdue/due-soon counts, and how many were completed). Error metrics
+# (minor/major admin errors, unnecessary work, missed jobs) are NOT frozen here:
+# they live in the findings sheets with the Verdict column, so a future dashboard
+# counts them from there (dropping "No Fault" rows) and joins labor variance from
+# the pulse. This store just holds the denominators the sheets can't provide.
+LOCATION_STATS_PATH = os.environ.get(
+    "LOCATION_STATS_PATH", "Monitoring/location_nightly_stats.json")
+
+
+def _record_location_stats(volumes, loc, date, submitter):
+    """Upsert the objective nightly volume per (location, night, program) into the
+    long-run stats sidecar. Keyed LOC|DATE|PROGRAM so a resubmission (or a
+    corrected work order) overwrites that night's row in place rather than
+    duplicating. Best-effort; only meaningful in Graph mode."""
+    if not volumes or DEBRIEF_SOURCE != "graph" or not GRAPH_CLIENT_SECRET:
+        return
+    loc_base = (loc or "").strip().upper().split("-")[0]
+    date_str = str(date or "")
+    if not loc_base or not date_str:
+        return
+    state = _graph_get_json(LOCATION_STATS_PATH) or {}
+    recs = state.get("records") or {}
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    for v in volumes:
+        prog = v.get("fleet") or "?"
+        recs[f"{loc_base}|{date_str}|{prog}"] = {
+            "location": loc_base, "date": date_str, "program": prog,
+            "planes": v.get("planes", 0),
+            "overdue_jobs": v.get("overdue_jobs", 0),
+            "due_soon_jobs": v.get("due_soon_jobs", 0),
+            "overdue_completed": v.get("overdue_completed", 0),
+            "due_soon_completed": v.get("due_soon_completed", 0),
+            "wo_url": v.get("wo_url") or "",
+            "submitter": submitter or None,
+            "updated_utc": now,
+        }
+    state["records"] = recs
+    state["updated_utc"] = now
+    try:
+        _graph_put_json(LOCATION_STATS_PATH, state)
+        print(f"\n[location stats recorded: {loc_base} {date_str} "
+              f"({len(volumes)} program(s))]", flush=True)
+    except Exception as e:  # noqa: BLE001 — bookkeeping never fails the run
+        print(f"\n[location stats write failed for {loc_base}: {e}]", flush=True)
+
+
 def main():
     body = _load_payload()
 
@@ -2528,6 +2583,7 @@ def main():
     # worksheet. Best-effort — never blocks the discrepancy email/records.
     wo_findings = []
     wo_sources = []
+    wo_volumes = []
     try:
         _prune_work_order_store()             # daily-gated retention sweep (best-effort)
     except Exception as e:  # noqa: BLE001
@@ -2535,8 +2591,21 @@ def main():
     try:
         _co = extract_closeout(body)          # parsed date object + location
         if WORKORDER_FINDINGS_ENABLED:
-            wo_findings, wo_sources = collect_work_order_findings(
+            wo_findings, wo_sources, wo_volumes = collect_work_order_findings(
                 body, _co["location"], _co["date"])
+            # Long-run stats: record objective nightly volume (best-effort, and
+            # regardless of whether there were any findings — a clean night still
+            # has planes / overdue / due-soon counts worth tracking).
+            if wo_volumes:
+                print(f"\n----- LOCATION VOLUME ({len(wo_volumes)} program(s)) -----", flush=True)
+                for v in wo_volumes:
+                    print(json.dumps(v), flush=True)
+                if send_on:
+                    try:
+                        _record_location_stats(wo_volumes, _co["location"],
+                                                _co["date"], report.get("submitter"))
+                    except Exception as e:  # noqa: BLE001
+                        print(f"\n[location stats record skipped: {e}]", flush=True)
             if wo_findings:
                 print(f"\n----- WORK ORDER FINDINGS ({len(wo_findings)}) -----", flush=True)
                 for f in wo_findings:
