@@ -71,6 +71,8 @@ DEBRIEF_PATHS = {
     "DFW_Envoy":    os.environ.get("ENVOY_DEBRIEF", "/mnt/user-data/uploads/Envoy_Debriefs.xlsx"),
     "DFW_Regional": os.environ.get("ENVOY_DEBRIEF", "/mnt/user-data/uploads/Envoy_Debriefs.xlsx"),
     "Frontier": os.environ.get("FRONTIER_DEBRIEF", "/mnt/user-data/uploads/Frontier_Debriefs.xlsx"),
+    # DFW widebody turns (Sam, 2026-09-28) — own workbook, one row per turn.
+    "Widebody": os.environ.get("WIDEBODY_DEBRIEF", "/mnt/user-data/uploads/Widebody_Debriefs.xlsx"),
 }
 
 # SharePoint file paths (used when DEBRIEF_SOURCE == "graph"), relative to the
@@ -86,6 +88,7 @@ DEBRIEF_SP_PATHS = {
     "DFW_Envoy":    "Power Flows/Debriefs/Envoy Debriefs.xlsx",
     "DFW_Regional": "Power Flows/Debriefs/Envoy Debriefs.xlsx",
     "Frontier": "Power Flows/Debriefs/Frontier Debriefs.xlsx",
+    "Widebody": "Power Flows/Debriefs/Widebody Debriefs.xlsx",
 }
 
 # Microsoft Graph / Entra credentials. Same Foxtrot Report Automation app used by
@@ -105,7 +108,8 @@ GRAPH_FETCH_DELAY_SEC = int(os.environ.get("GRAPH_FETCH_DELAY_SEC", "20"))
 DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
                   "Mesa": "Debriefs", "Ultra": "Input", "Breeze": "Input",
                   "JSX": "Sheet1",
-                  "DFW_Envoy": "DFW", "DFW_Regional": "DFW", "Frontier": "Sheet2"}
+                  "DFW_Envoy": "DFW", "DFW_Regional": "DFW", "Frontier": "Sheet2",
+                  "Widebody": "Sheet1"}
 
 # Per-fleet column layout of each debrief sheet, by 0-based column index. Most
 # workbooks are Date/Name/Location/Tail at cols 0-3, but two diverge:
@@ -138,6 +142,8 @@ DEBRIEF_LAYOUT = {
     "DFW_Envoy":    {"date": 0, "location": None, "tail": 2},
     "DFW_Regional": {"date": 0, "location": None, "tail": 2},
     "Frontier":     {"date": 0, "location": 2,    "tail": 3},
+    # Widebody Sheet1: Date/Name/Tail Number/Location/Customer/Widebody/...
+    "Widebody":     {"date": 0, "location": 3,    "tail": 2},
 }
 
 # Some debrief fleets share a sheet and are told apart by a COLUMN VALUE, not by
@@ -167,9 +173,10 @@ FLEET_LOCATION_OVERRIDE = {
 }
 
 # Fleets reconciled at tail level only (services ignored) regardless of the
-# global TAIL_LEVEL_ONLY flag. Empty for now — Ultra used to be here, but it now
-# compares its value-service (see DEBRIEF_VALUE_SERVICE).
-TAIL_LEVEL_FLEETS = set()
+# global TAIL_LEVEL_ONLY flag. Ultra used to be here (it now compares its
+# value-service, see DEBRIEF_VALUE_SERVICE). Widebody is a single-service
+# fleet — every row IS a widebody turn — so presence is the whole compare.
+TAIL_LEVEL_FLEETS = {"Widebody"}
 
 # Fleets whose debrief service columns hold numeric 1/0 (or booleans) rather than
 # "Yes"/"No" strings. Breeze ("Breeze RON"/"Breeze Ultra") and JSX (RON/Interior
@@ -526,6 +533,12 @@ NAMED_KEY_FLEET_FIELDS = [
     ("Ultra", "ultra", ("Tail Number", "Tail", "Dropdown"),
      ("Ultra", "Service(s)", "Service(s) Performed", "Service Performed", "Services"),
      _canon_ultra_service),
+    # DFW widebody turns (field 51 -> "widebody" key, Sam 2026-09-28):
+    # tail-level fleet, so any service text in the rows is parsed but the
+    # compare only checks presence (TAIL_LEVEL_FLEETS).
+    ("Widebody", "widebody", ("Tail Number", "Tail", "Dropdown"),
+     ("Service(s) Performed", "Service Performed", "Services", "Service(s)"),
+     _canon_closeout_service),
     # DFW Regional carriers (Skywest/PSA/…) — same multi-code service string as
     # Envoy (RRON etc.); reconciled against the Regional rows of the Envoy DFW
     # sheet (DEBRIEF_ROW_FILTER["DFW_Regional"]).
