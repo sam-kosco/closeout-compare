@@ -2156,6 +2156,9 @@ def collect_work_order_findings(body, loc, date):
                                  "detail": f"no debrief available to check the {fleet} work order"})
                 continue
             cwo = _canon_work_order(parsed, fleet)
+            # Drop services this location doesn't perform (e.g. CLT/TYS don't do
+            # Lav) so they aren't flagged missed or counted in the volume.
+            cwo = work_order.strip_location_excluded(cwo, loc)
             vol = work_order.summarize(cwo, db)
             vol.update({"fleet": fleet, "wo_url": url})
             volumes.append(vol)

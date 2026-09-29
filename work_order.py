@@ -129,6 +129,38 @@ def unnecessary_services(fleet):
     set minus any routine-SOP exclusions."""
     return tracked_services(fleet) - UNNECESSARY_EXCLUDE.get(fleet, set())
 
+
+# Services a specific LOCATION does not perform at all, so the work order listing
+# them as due is not that location's miss and shouldn't count against it. Dropped
+# from the work order BEFORE the missed check and the volume counts (keyed by bare
+# location code). CLT and TYS don't do Lav Pressure Washes (Sam, 2026-09-29), so
+# an overdue/due-soon LAV there is neither a missed priority nor a tracked job in
+# their denominators.
+LOCATION_SERVICE_EXCLUDE = {
+    "CLT": {"LAV"},
+    "TYS": {"LAV"},
+}
+
+
+def strip_location_excluded(work_order, location):
+    """Return the work order with any services the location doesn't perform removed
+    from every tail's overdue/due_soon — so they're neither flagged missed nor
+    counted as volume. No-op when the location has no exclusions."""
+    loc = (location or "").strip().upper().split("-")[0]
+    excl = LOCATION_SERVICE_EXCLUDE.get(loc)
+    if not excl:
+        return work_order
+    tails = {}
+    for t, info in work_order.get("tails", {}).items():
+        tails[t] = {
+            "station": info.get("station"),
+            "overdue": {c: d for c, d in info.get("overdue", {}).items() if c not in excl},
+            "due_soon": {c: d for c, d in info.get("due_soon", {}).items() if c not in excl},
+        }
+    out = dict(work_order)
+    out["tails"] = tails
+    return out
+
 _DASH = r"[—–-]"                       # em / en / hyphen
 # A tail token: 3–8 chars of letters/digits, must contain a digit. Matches full
 # N-numbers (N203NN, N80348) and GoJet's bare aircraft numbers (506, 536).
