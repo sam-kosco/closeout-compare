@@ -9,9 +9,14 @@ Source of truth for intent: `Randomized_Quality_Audit_Program.pdf`
 
 ## The program in one paragraph
 
-Each location owes audits per night based on its work order: **5 or fewer
-planes → audit every plane; 6 or more → half, rounded up.** At 6+, the tails
-to audit are **drawn at random when the nightly work order is generated** and
+Each location owes audits per night based on its work order. **Count rule
+(AMENDED by Sam, 2026-10-01 — strictly non-decreasing): 1–3 planes → all;
+4–5 → 3; 6+ → half rounded up, floored at 4 (so 6 → 4).** The original
+PDF's "≤5 all / 6+ half" rule dropped from 5 required at 5 planes to 3 at
+6; the amendment smooths the ramp (1,2,3,3,3,4,4,4,5,5,6,6,7,7…) and
+matches the old rule exactly from 7 planes up. Whenever fewer than all are
+owed, the tails to audit are
+**drawn at random when the nightly work order is generated** and
 printed on it — nobody picks their best-looking plane, and local management
 cannot change the list (a no-show tail = audit the next tail completed, note
 the swap). Every submitted audit across an RM's locations forms one nightly
@@ -97,8 +102,9 @@ note the swap on the audit.
   extracted text (they come out as replacement chars).
 - Header regex: `QUALITY AUDIT\s*[-–—]+\s*(?:ALL\s+(\d+)|(\d+) of (\d+))`
 - Tails: following `\[ \]\s*([A-Z0-9]+)` lines until a non-matching line.
-- ≤5 planes: section reads `QUALITY AUDIT -- ALL 3 planes` with every tail
-  listed (parser treats identically).
+- When every plane is owed (1–3 planes since the 2026-10-01 amendment):
+  section reads `QUALITY AUDIT -- ALL 3 planes` with every tail listed
+  (parser treats identically).
 - VERIFIED 2026-09-30 with pypdf (the reconciler's extractor) against
   generated PSA PDFs: 8 tails -> "-- 4 of 8" + 4 checkbox tails; 4 tails
   -> "-- ALL 4 planes" + all 4; swap sentence intact in both.
@@ -146,7 +152,9 @@ content PUT via locations._write_ours — not live workbooks).
    the section (header + checkbox tails, from_snapshot too); reconciler
    `RANDOMIZED_FLEETS` gate, `_handle_audit_assignment` writes the
    sidecar unconditionally + "No audit assignment"/"Audit count off"
-   findings; `_expected_audits(n) = n if n<=5 else ceil(n/2)`.
+   findings; `_expected_audits(n)` — originally `n if n<=5 else
+   ceil(n/2)`, since 2026-10-01 `n if n<=3 else 3 if n<=5 else
+   max(4, ceil(n/2))` (the non-decreasing amendment, raDraw matches).
 3. ✅ platform (2026-10-01, this branch a5e9100): registry flags,
    engine/quality_reviews.py (assignment_coverage, run_draw with
    disjoint RM sets + Director leftovers, draw emails, daemon loop at

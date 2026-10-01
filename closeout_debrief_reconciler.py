@@ -2122,9 +2122,13 @@ def _canon_work_order(parsed, fleet):
 
 
 def _expected_audits(n):
-    """The program's count rule: <=5 planes -> all audited; 6+ -> half,
-    rounded up (RANDOM_AUDITS_PLAN.md)."""
-    return n if n <= 5 else -(-n // 2)
+    """The program's count rule (Sam, 2026-10-01 — strictly
+    non-decreasing; the original <=5-all / 6+-half rule dropped from 5
+    required at 5 planes to 3 at 6): 1-3 planes -> all; 4-5 -> 3; 6+ ->
+    half rounded up, floored at 4 (so 6 -> 4). RANDOM_AUDITS_PLAN.md
+    carries the full table; the tracker pages' raDraw() must stay in
+    lockstep with this."""
+    return n if n <= 3 else 3 if n <= 5 else max(4, -(-n // 2))
 
 
 def _handle_audit_assignment(parsed, fleet, loc, date, findings, url):
