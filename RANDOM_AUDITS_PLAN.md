@@ -124,6 +124,11 @@ content PUT via locations._write_ours — not live workbooks).
 
 - Platform: everything behind `QUALITY_RANDOM_AUDITS` env (default false) +
   per-location `randomized` registry flags — merge dark, flip at launch.
+  **At launch, set QUALITY_RANDOM_AUDITS as a STICKY slot setting** (true
+  on production, false on staging — same as USER_DIGEST/RAMP_ALERTS):
+  a staging boot after 9 AM would otherwise run the draw with SEND_EMAIL
+  sticky-false, stamp the day in audit_reviews.json, and production would
+  then skip it — assignments recorded, nobody emailed.
 - Tracker pages: `const RANDOM_AUDITS = false;` at the top of each Work
   Order tab's script — merged dark too; flipping it per-program is the
   per-tracker launch switch (PSA first, Sam decides order).
@@ -132,13 +137,48 @@ content PUT via locations._write_ours — not live workbooks).
 
 ## Build order
 
-1. envoy-compliance-tracker: draw + PDF section on PSA page (reference
-   implementation), then Envoy + GoJet pages. (Mesa untouched.)
-2. closeout-compare: parse + sidecar + "missing audit section" finding.
-3. platform: registry flags, assignment coverage, draw job + dispatcher
-   slot, Approvals pinning, inbox nudge ("your 3 reviews are ready").
-4. Sandbox end-to-end: generate a WO PDF with the draw → run reconciler on a
-   fake closeout payload with it → platform draw job on seeded SC data.
+1. ✅ envoy-compliance-tracker (2026-09-30, ect branch 9fead96e): draw +
+   highlighted shift list + AUDIT chips + QUALITY AUDIT PDF section on
+   psa/index(envoy)/gojet pages, snapshot carries audit_required/
+   audit_tails; `const RANDOM_AUDITS = true` on the branch. (Mesa
+   untouched.)
+2. ✅ closeout-compare (2026-09-30, branch 667e5c8): work_order.py parses
+   the section (header + checkbox tails, from_snapshot too); reconciler
+   `RANDOMIZED_FLEETS` gate, `_handle_audit_assignment` writes the
+   sidecar unconditionally + "No audit assignment"/"Audit count off"
+   findings; `_expected_audits(n) = n if n<=5 else ceil(n/2)`.
+3. ✅ platform (2026-10-01, this branch a5e9100): registry flags,
+   engine/quality_reviews.py (assignment_coverage, run_draw with
+   disjoint RM sets + Director leftovers, draw emails, daemon loop at
+   QUALITY_DRAW_HOUR_ET), approvals payload `reviews`, quality.js
+   superior/admin/unassigned sections, location overdue chips dropped
+   behind `random_audits`. Draw verified over 10 randomized runs
+   (scratchpad test_draw.py): disjointness, leftovers-only Directors,
+   once-per-day guard, retention prune, extras shapes, swap-credited
+   coverage.
+4. ✅ Sandbox end-to-end (2026-10-01, scratchpad test_phase4.py + the
+   phase-3 sandbox server). REAL artifacts at every seam: the live PSA
+   page (RANDOM_AUDITS on, served locally) generated two work orders —
+   8 tails drew 4 at random (not the first four), 4 tails printed
+   "ALL 4 planes"; both PDFs went through the reconciler's own
+   `_pdf_text` + `parse_work_order` (audit section matched the draw
+   exactly, zero false findings), `_handle_audit_assignment` with
+   RANDOMIZED_FLEETS={"PSA"} wrote the sidecar records
+   (`CAK|PSA|2026-10-01`, required/on_shift/tails/wo_url/parsed_at);
+   the missing-section and count-off findings fire on launched fleets
+   and stay silent for Mesa; and the platform's assignment_coverage
+   read that exact sidecar back — 3 assigned tails + 1 swap scored
+   satisfied 4/4 (1 swap), one-short scored missing 1. The platform
+   review-draw leg ran earlier the same day against LIVE SafetyCulture
+   data in the worktree sandbox: 24 disjoint assignments across 5 RMs
+   + 3 Directors, Approvals views verified for admin and RM.
+
+**ALL FOUR PHASES DONE — the program is launch-ready.** Remaining is
+Sam's launch sequence only: flip `RANDOM_AUDITS` on each tracker page
+(PSA first), set the reconciler's `RANDOMIZED_FLEETS`, add
+`QUALITY_RANDOM_AUDITS=true` as a STICKY production slot setting, and
+merge the three branches. Open question #4 (follow-up tracking after a
+fail) stays manual in v1.
 
 ## Sam's answers (2026-09-30)
 
