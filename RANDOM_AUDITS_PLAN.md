@@ -135,12 +135,36 @@ content PUT via locations._write_ours — not live workbooks).
 4. Sandbox end-to-end: generate a WO PDF with the draw → run reconciler on a
    fake closeout payload with it → platform draw job on seeded SC data.
 
-## Open questions for Sam
+## Sam's answers (2026-09-30)
 
-1. DFW Envoy IHCs: in (default) or out?
-2. Draw time for RM/Director reviews — 10:00 AM ET after the overnight
-   audits land? (Dispatcher slot, weekdays? or daily?)
-3. Should the RM's 3 assigned reviews arrive by email/inbox as well as on
-   the Approvals tab? (Plan assumes inbox note + the tab.)
-4. Follow-up audits after a fail: tracked in v1 or manual for now?
-   (Plan assumes manual for v1.)
+1. DFW Envoy IHCs: **IN**.
+2. Draw at **9:00 AM ET, daily** — in-process daily loop on the platform
+   (digest pattern: `QUALITY_DRAW_HOUR_ET=9`, gated on
+   QUALITY_RANDOM_AUDITS), not a dispatcher workflow.
+3. **One email per superior at draw time** (mailer, SEND_EMAIL-gated):
+   each assigned audit as Location | audit-type label | Submitter, each
+   linking to app.safetyculture.com/inspection/<id>. Plus the Approvals
+   tab pinning.
+4. Follow-up tracking after a fail: OPEN — v1 assumes manual.
+
+## Approvals redesign: overdue is a PER-RM thing now (Sam, 2026-09-30)
+
+Overdue audits stay a TOPLINE number, but per-LOCATION blocks stop
+listing them — accountability moves to the responsible reviewer (the
+person the draw assigned). The Approvals tab becomes:
+
+- **Superior (RM/Director) view:**
+  1. *Your pending reviews* — every audit assigned to YOU still awaiting
+     your approve/fail, **overdue first** (awaiting > APPROVAL_DUE_DAYS),
+     then newest. Visually identical rows to today.
+  2. *Your reports' overdue* — below, the OVERDUE pending audits assigned
+     to reviewers downstream of the viewer (a Director sees their RMs'
+     overdue backlogs; an RM with no reporting reviewers sees nothing).
+- **Global Admin view:** ALL pending + overdue audits **grouped by
+  responsible RM**, overdue-first inside each group.
+- Audits with no assignment (pre-launch backlog, non-randomized programs,
+  pool leftovers nobody drew) sit in an *Unassigned* group, visible to
+  admins and to the org-scoped approvers exactly as today — the old
+  behavior is the fallback, not an error.
+- Location drill-ins keep their scores/coverage; only the overdue listing
+  moves out.
