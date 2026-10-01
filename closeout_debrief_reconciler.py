@@ -1828,7 +1828,9 @@ WORKORDER_SHEET = os.environ.get("WORKORDER_SHEET", "Work Order Findings")
 WORKORDER_HEADERS = ["Location", "Tail", "Date", "Program", "Finding", "Service",
                      "Detail", "Work Order Link", "Status", "Notes", "Comp Anlyst"]
 WO_FINDING_LABEL = {"missed": "Missed priority", "unnecessary": "Unnecessary",
-                    "off_work_order": "Off work order", "invalid": "Invalid work order"}
+                    "off_work_order": "Off work order", "invalid": "Invalid work order",
+                    "no_audit_section": "No audit assignment",
+                    "audit_count": "Audit count off"}
 # Power Automate "When an HTTP request is received" flow that appends each
 # work-order finding as a row to the "Work Order Findings" worksheet of Closeout
 # Compare.xlsx (Excel connector's "Add a row into a table"). Used INSTEAD of the
@@ -1857,6 +1859,19 @@ _WO_REC_URL      = "Work Order"   # link to the uploaded work order this finding
 WO_POSTED_STATE_PATH = os.environ.get(
     "WO_POSTED_STATE_PATH", "Monitoring/work_order_findings_posted.json")
 WO_POSTED_RETENTION_DAYS = int(os.environ.get("WO_POSTED_RETENTION_DAYS", "60"))
+
+# ---- Randomized Quality Audit Program (RANDOM_AUDITS_PLAN.md) --------------
+# LAUNCH SWITCH: fleets whose work orders MUST carry a QUALITY AUDIT section
+# (mirrors the tracker pages' RANDOM_AUDITS consts — flip them together, one
+# program at a time). Empty = pre-launch: the parser still RECORDS any
+# section it finds, but nothing is flagged for not having one.
+RANDOMIZED_FLEETS = set()      # e.g. {"PSA", "Envoy", "GoJet"}
+# Hub sidecar the platform's 9 AM review draw reads: one entry per
+# location+fleet+night with the randomly assigned audit tails.
+AUDIT_ASSIGNMENTS_PATH = os.environ.get(
+    "AUDIT_ASSIGNMENTS_PATH", "Monitoring/audit_assignments.json")
+AUDIT_ASSIGNMENTS_RETENTION_DAYS = int(os.environ.get(
+    "AUDIT_ASSIGNMENTS_RETENTION_DAYS", "60"))
 
 # "<fleet>_wo" key prefix -> reconciler fleet.
 WO_KEY_FLEET = {"envoy": "Envoy", "regional": "Regional", "ultra": "Ultra",
@@ -2106,6 +2121,59 @@ def _canon_work_order(parsed, fleet):
     return out
 
 
+def _expected_audits(n):
+    """The program's count rule: <=5 planes -> all audited; 6+ -> half,
+    rounded up (RANDOM_AUDITS_PLAN.md)."""
+    return n if n <= 5 else -(-n // 2)
+
+
+def _handle_audit_assignment(parsed, fleet, loc, date, findings, url):
+    """Randomized Quality Audit Program: persist the work order's QUALITY
+    AUDIT assignment to the hub sidecar the platform's 9 AM review draw
+    reads, and flag a launched fleet whose work order lacks or miscounts
+    the section. Recording is UNCONDITIONAL (a section only exists once a
+    tracker page launched); the findings are gated on RANDOMIZED_FLEETS.
+    Best-effort: a failed sidecar write prints and never fails the run."""
+    audit = parsed.get("audit")
+    if audit is None:
+        if fleet in RANDOMIZED_FLEETS:
+            findings.append({"fleet": fleet, "type": "no_audit_section",
+                             "tail": None, "service": None,
+                             "detail": "work order carries no QUALITY AUDIT "
+                                       "section — regenerate it from the "
+                                       "tracker's Work Order tab"})
+        return
+    n = int(audit.get("on_shift") or len(parsed.get("on_shift") or ()) or 0)
+    listed = len(audit.get("tails") or ())
+    required = int(audit.get("required") or 0)
+    if n and (required != _expected_audits(n) or listed != required):
+        findings.append({"fleet": fleet, "type": "audit_count",
+                         "tail": None, "service": None,
+                         "detail": f"QUALITY AUDIT section lists {listed} "
+                                   f"tail(s) against {required} required, "
+                                   f"but {n} planes on shift require "
+                                   f"{_expected_audits(n)} — hand-edited or "
+                                   f"stale work order?"})
+    try:
+        state = _graph_get_json(AUDIT_ASSIGNMENTS_PATH) or {}
+        key = f"{(loc or '').upper()}|{fleet}|{date.isoformat()}"
+        state[key] = {"required": required or listed,
+                      "on_shift": n or None,
+                      "tails": list(audit.get("tails") or []),
+                      "wo_url": url,
+                      "parsed_at": datetime.datetime.now(
+                          datetime.timezone.utc).isoformat()}
+        cutoff = (datetime.date.today() - datetime.timedelta(
+            days=AUDIT_ASSIGNMENTS_RETENTION_DAYS)).isoformat()
+        state = {k: v for k, v in state.items() if k.split("|")[-1] >= cutoff}
+        _graph_put_json(AUDIT_ASSIGNMENTS_PATH, state)
+        print(f"[audit assignment recorded: {key} — {listed} tail(s)]",
+              flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[audit assignment record FAILED for {loc}/{fleet}: {e!r}]",
+              flush=True)
+
+
 def collect_work_order_findings(body, loc, date):
     """Parse every uploaded work order (payload '<fleet>_wo' keys) and evaluate it
     against the debrief. Returns (findings, sources):
@@ -2145,6 +2213,7 @@ def collect_work_order_findings(body, loc, date):
                 continue
             fleet = parsed.get("fleet") or hint or "unknown"
             sources.append({"fleet": fleet, "url": url, "kind": kind, "ok": True})
+            _handle_audit_assignment(parsed, fleet, loc, date, findings, url)
             try:
                 db = _debrief_serviced_by_tail(fleet, loc, date)
             except Exception as e:  # noqa: BLE001

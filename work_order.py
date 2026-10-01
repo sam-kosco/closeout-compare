@@ -169,6 +169,13 @@ _TAIL_RE = re.compile(rf"^({_TAIL_TOK})(?:\s+([A-Z]{{2,4}}))?$")
 _COMPLIANT_TAIL_RE = re.compile(rf"^({_TAIL_TOK})\s+No additional", re.I)
 _OVERDUE_RE = re.compile(rf"^(.*?)\s+{_DASH}\s+(\d+)\s+days?\s+overdue$", re.I)
 _DUESOON_RE = re.compile(rf"^(.*?)\s+{_DASH}\s+due in\s+(\d+)\s+days?$", re.I)
+# Randomized Quality Audit Program (RANDOM_AUDITS_PLAN.md): the work order's
+# QUALITY AUDIT section is a PARSED CONTRACT with the tracker pages. ASCII
+# "--" on purpose (jsPDF em-dashes extract as replacement chars), but the
+# regex accepts real dashes too in case a future generator uses them.
+_AUDIT_HDR_RE = re.compile(
+    r"QUALITY AUDIT\s*[-–—]+\s*(?:ALL\s+(\d+)|(\d+)\s+of\s+(\d+))", re.I)
+_AUDIT_BOX_RE = re.compile(rf"^\[\s*\]\s*({_TAIL_TOK})$")
 
 
 def _has_digit(s):
@@ -229,6 +236,7 @@ def parse_work_order(text):
     NONCOMPLIANT / DUE SOON / COMPLIANT)."""
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     fleet = date = None
+    audit = None              # QUALITY AUDIT section, when the WO carries one
     header_found = False       # the "<Fleet> — Nightly Work Order" header was seen
     tails = {}
     on_shift = set()
@@ -255,6 +263,19 @@ def parse_work_order(text):
         if up.startswith("TAILS ON SHIFT"):
             section, cur = "roster", None
             continue
+        if up.startswith("QUALITY AUDIT"):
+            m = _AUDIT_HDR_RE.search(ln)
+            if m:
+                if m.group(1):                     # "ALL N planes" (<=5 rule)
+                    audit = {"required": int(m.group(1)),
+                             "on_shift": int(m.group(1)),
+                             "all": True, "tails": []}
+                else:                              # "R of N planes (random draw)"
+                    audit = {"required": int(m.group(2)),
+                             "on_shift": int(m.group(3)),
+                             "all": False, "tails": []}
+                section, cur = "audit", None
+            continue
         if up.startswith("GENERATED") or up.startswith("FOXTROT AVIATION"):
             section, cur = None, None       # footer / sub-header
             continue
@@ -267,6 +288,14 @@ def parse_work_order(text):
             for tok in ln.split():
                 if re.fullmatch(_TAIL_TOK, tok) and _has_digit(tok):
                     on_shift.add(tok.upper())
+            continue
+
+        # Assigned audit tails: "[ ] <tail>" checkbox lines. The swap-rule
+        # sentence after them matches nothing and simply falls through.
+        if section == "audit":
+            mb = _AUDIT_BOX_RE.match(ln)
+            if mb and audit is not None:
+                audit["tails"].append(mb.group(1).upper())
             continue
 
         # A service line? (test before the tail pattern — service lines carry " — ")
@@ -304,6 +333,7 @@ def parse_work_order(text):
 
     return {"fleet": fleet, "date": date, "tails": tails,
             "on_shift": on_shift, "unknown_services": unknown,
+            "audit": audit,
             # False when the uploaded PDF isn't a real Nightly Work Order (wrong
             # file — e.g. someone attached the Labor Pulse Sheet instead). The
             # reconciler raises an "invalid work order" flag on this. A genuine
@@ -376,8 +406,15 @@ def from_snapshot(snap, fleet=None):
     for tail in (snap.get("onShift") or []):
         on_shift.add(str(tail).strip().upper())
 
+    audit = None
+    atails = [str(x).strip().upper() for x in (snap.get("audit_tails") or []) if str(x).strip()]
+    if atails:
+        required = int(snap.get("audit_required") or len(atails))
+        audit = {"required": required, "on_shift": len(on_shift) or required,
+                 "all": required >= len(on_shift) > 0, "tails": atails}
     return {"fleet": fleet, "date": date, "tails": tails,
             "on_shift": on_shift, "unknown_services": unknown,
+            "audit": audit,
             "is_work_order": True}
 
 
