@@ -2569,13 +2569,19 @@ def main():
     if report.get("skipped"):
         return  # location skipped (DFW/STL AD HOC) or unparseable — no email
 
-    # Heartbeat for the daily monitor: record that this location-based closeout
-    # submitted, so the monitor can flag a location that has gone quiet. Only for
-    # named-key (location-based) closeouts — the main form's many dropdown stations
-    # aren't on the monitor's per-location watch. Best-effort.
-    if _is_named_key_payload(body):
-        _record_closeout_submission(report.get("location"), report.get("date"),
-                                    report.get("submitter"))
+    # Heartbeat for the daily monitor: record that this location submitted, so
+    # the monitor can flag one that has gone quiet. EVERY reconciled closeout
+    # is recorded now (Sam, 2026-10-01) — it used to be named-key (location-
+    # specific) closeouts only, on the assumption that the main form's dropdown
+    # stations weren't watched. They are now: the ten stations still on the
+    # general Commercial Closeout 2.0 form (the PSA set + IAH/Mesa + STL/GoJet)
+    # joined the monitor's watch list, and they can't be watched if they never
+    # stamp the sidecar. `_record_closeout_submission` already reduces
+    # 'DCA-PSA' to the bare airport code, so main-form locations key the same
+    # way the named-key ones do. Skipped locations returned above and are still
+    # never recorded. Best-effort: a write failure never fails the run.
+    _record_closeout_submission(report.get("location"), report.get("date"),
+                                report.get("submitter"))
 
     send_on = os.environ.get("SEND_EMAIL", "true").lower() == "true"
 
