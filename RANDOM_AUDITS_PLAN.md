@@ -93,10 +93,15 @@ QUALITY AUDIT — 4 of 8 planes (random draw)
 If an assigned tail doesn't come in, audit the next tail completed and
 note the swap on the audit.
 ```
-- Header regex: `QUALITY AUDIT\s*[—-]\s*(\d+) of (\d+)`
+- The dash is ASCII `--` ON PURPOSE: jsPDF/helvetica mangles em-dashes in
+  extracted text (they come out as replacement chars).
+- Header regex: `QUALITY AUDIT\s*[-–—]+\s*(?:ALL\s+(\d+)|(\d+) of (\d+))`
 - Tails: following `\[ \]\s*([A-Z0-9]+)` lines until a non-matching line.
-- ≤5 planes: section reads `QUALITY AUDIT — ALL 3 planes` with every tail
+- ≤5 planes: section reads `QUALITY AUDIT -- ALL 3 planes` with every tail
   listed (parser treats identically).
+- VERIFIED 2026-09-30 with pypdf (the reconciler's extractor) against
+  generated PSA PDFs: 8 tails -> "-- 4 of 8" + 4 checkbox tails; 4 tails
+  -> "-- ALL 4 planes" + all 4; swap sentence intact in both.
 
 ## Sidecar schemas (hub, written by closeout-compare, read by platform)
 
