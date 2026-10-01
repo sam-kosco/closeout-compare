@@ -238,10 +238,11 @@ IAH_DISPATCH_STATE_PATH = os.environ.get(
 IAH_DISPATCH_STATE_KEEP = int(os.environ.get("IAH_DISPATCH_STATE_KEEP", "60"))
 
 # Closeout-submission heartbeat for the daily monitor (Foxtrot-Aviation-Services/
-# core, jobs/monitor.py). Each location-based (named-key) closeout run stamps its
-# location's last-submission time into this Data Hub sidecar; the monitor reads it
-# and flags any watched location that has gone quiet (a station that stopped
-# submitting nightly closeouts). This drive is the DataHub Shared Documents drive
+# core, jobs/monitor.py). EVERY reconciled closeout stamps its location's
+# last-submission time and service date into this Data Hub sidecar (Sam,
+# 2026-10-01 — it used to be named-key closeouts only, which left the ten
+# general-form stations unwatchable); the monitor reads it and flags any watched
+# location that has gone quiet. This drive is the DataHub Shared Documents drive
 # — the same one the monitor reads — so the path resolves identically on both
 # sides. Best-effort: a write failure here never fails the reconciliation run.
 CLOSEOUT_SUBMISSIONS_PATH = os.environ.get(
