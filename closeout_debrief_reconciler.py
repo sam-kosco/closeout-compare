@@ -222,7 +222,7 @@ IAH_DISPATCH_SENDER_NAME  = os.environ.get("IAH_DISPATCH_SENDER_NAME",  "Renel A
 IAH_DISPATCH_SENDER_EMAIL = os.environ.get("IAH_DISPATCH_SENDER_EMAIL", "renel.anthony@foxtrotaviation.com")
 IAH_DISPATCH_RECIPIENTS   = [e.strip() for e in os.environ.get(
     "IAH_DISPATCH_RECIPIENTS",
-    "samuel.kosco@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com,david.blatt@foxtrotaviation.com,renel.anthony@foxtrotaviation.com,robert.murillo@foxtrotaviation.com,heidi.cromer@foxtrotaviation.com,daniel.digiambattista@foxtrotaviation.com,anthony.pentz@foxtrotaviation.com,clara.lana@foxtrotaviation.com,chris.stump@foxtrotaviation.com,nicholas.thomas@foxtrotaviation.com,jessica.clapper@foxtrotaviation.com,russell.dozier@mesa-air.com,shayla.ortiz@mesa-air.com,eric.nation@mesa-air.com,andy.jamison@united.com").split(",") if e.strip()]
+    "samuel.kosco@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com,david.blatt@foxtrotaviation.com,renel.anthony@foxtrotaviation.com,robert.murillo@foxtrotaviation.com,heidi.cromer@foxtrotaviation.com,daniel.digiambattista@foxtrotaviation.com,anthony.pentz@foxtrotaviation.com,clara.lana@foxtrotaviation.com,chris.stump@foxtrotaviation.com,nicholas.thomas@foxtrotaviation.com,jessica.clapper@foxtrotaviation.com,russell.dozier@rjet.com,eric.nation@mesa-air.com,andy.jamison@united.com").split(",") if e.strip()]
 
 # IAH dispatch is once-per-day: the first IAH closeout for a given date (field 4)
 # sends the dispatch email; later closeouts for that same date are resubmissions
