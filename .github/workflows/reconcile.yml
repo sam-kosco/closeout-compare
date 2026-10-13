@@ -82,10 +82,9 @@ jobs:
           # worksheet is written — no longer just the upload-arrival check. Set to
           # "false" to fall back to the arrival check only.
           WORKORDER_FINDINGS_ENABLED: "true"
-          # Recipients of the closeout / discrepancy emails. Sam is added
-          # TEMPORARILY (2026-09-11) to monitor the new work-order analysis —
-          # remove his address to revert to Clara + Maren only.
-          EMAIL_TO: "clara.lana@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com,samuel.kosco@foxtrotaviation.com"
+          # Recipients of the closeout / discrepancy emails. (Sam watched the
+          # work-order rollout 2026-09-11 and came back off 2026-10-13.)
+          EMAIL_TO: "clara.lana@foxtrotaviation.com,maren.pinpin@foxtrotaviation.com"
           # Power Automate "When an HTTP request is received" flow that appends
           # each discrepancy to the compliance Excel table. Stored as a secret
           # because the URL carries its own SAS signature. If unset, discrepancy
