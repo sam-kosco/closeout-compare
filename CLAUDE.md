@@ -76,8 +76,9 @@ The monitor's closeout sweep is what surfaces that, a morning later.
   form. `STL AD HOC` has no dash, so a plain `STL` never matches it.
 - **Every fleet is shaped differently and the differences are load-bearing.**
   `DEBRIEF_LAYOUT` carries a 0-based column index per fleet because the
-  workbooks disagree: Mesa and the DFW sheet have no Location column at all
-  (every row is implicitly IAH / DFW), JSX puts the date at column 3, Ultra and
+  workbooks disagree: the DFW sheet has no Location column at all (Mesa gained one
+  2026-10-19 for IAD and is read by header; blank = IAH) — every DFW row is
+  implicitly DFW. JSX puts the date at column 3, Ultra and
   Breeze put the tail at column 1. `DEBRIEF_ROW_FILTER` splits DFW_Envoy from
   DFW_Regional by a column VALUE on a shared sheet. Read the comment block
   above `DEBRIEF_LAYOUT` before touching any of it.

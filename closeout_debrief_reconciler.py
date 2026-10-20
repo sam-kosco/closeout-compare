@@ -111,9 +111,13 @@ DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
                   "DFW_Envoy": "DFW", "DFW_Regional": "DFW", "Frontier": "Sheet2",
                   "Widebody": "Sheet1"}
 
-# Per-fleet column layout of each debrief sheet, by 0-based column index. Most
-# workbooks are Date/Name/Location/Tail at cols 0-3, but two diverge:
-#   * Mesa has NO Location column (every row is implicitly IAH): Date/Name/Tail.
+# Per-fleet column layout of each debrief sheet, by 0-based column index — or
+# by HEADER NAME (a str), resolved against the sheet's header row each run.
+# Most workbooks are Date/Name/Location/Tail at cols 0-3, but some diverge:
+#   * Mesa is read BY HEADER (2026-10-19): a Location column was inserted as
+#     column C for the IAD launch, and the fixed index read it as the tail.
+#     Rows from before the column existed are blank and count as IAH
+#     (`blank_location`).
 #   * Ultra ("Input" sheet) is Date/Tail/Name/Location — tail at col 1, location
 #     at col 3. Its service is a single value in the "Service" column (see
 #     DEBRIEF_VALUE_SERVICE), not a set of yes/no service-code columns.
@@ -135,7 +139,8 @@ DEBRIEF_LAYOUT = {
     "GoJet": {"date": 0, "location": 2,    "tail": 3},
     "PSA":   {"date": 0, "location": 2,    "tail": 3},
     "Envoy": {"date": 0, "location": 2,    "tail": 3},
-    "Mesa":  {"date": 0, "location": None, "tail": 2},
+    "Mesa":  {"date": "Date", "location": "Location", "tail": "Tail Number",
+              "blank_location": "IAH"},
     "Ultra": {"date": 0, "location": 3,    "tail": 1},
     "Breeze": {"date": 0, "location": 3,   "tail": 1},
     "JSX":   {"date": 3, "location": 2,    "tail": 0},
@@ -851,22 +856,37 @@ def load_debrief_day(fleet, closeout_loc, date):
     """Return {tail: set(canonical services)} for the given fleet/location/date.
 
     Column positions vary by workbook and are read from DEBRIEF_LAYOUT:
-    PSA/Envoy/GoJet are Date/Name/Location/Tail at cols 0-3; Mesa has no Location
-    column (Date/Name/Tail, every row implicitly IAH); Ultra is Date/Tail/Name/
-    Location with its service in a single "Service" value column.
+    PSA/Envoy/GoJet are Date/Name/Location/Tail at cols 0-3; Mesa is found by
+    header (a blank Location is IAH); Ultra is Date/Tail/Name/Location with its
+    service in a single "Service" value column.
 
     Services are read one of two ways: most fleets have one yes/no column per
     service code (DEBRIEF_COL_MAP); "value-service" fleets (DEBRIEF_VALUE_SERVICE,
     e.g. Ultra) have a single column whose value names the service."""
     layout = DEBRIEF_LAYOUT[fleet]
-    date_idx = layout["date"]
-    loc_idx  = layout["location"]   # None -> workbook has no Location column
-    tail_idx = layout["tail"]
 
     sheet = DEBRIEF_SHEETS[fleet]
     wb = _open_debrief_workbook(fleet)
     ws = wb[sheet]
     header = list(next(ws.iter_rows(max_row=1, values_only=True)))
+
+    def _col(spec, what, required):
+        # An int is a fixed position; a str is a header name looked up now, so
+        # an inserted column can't shift what we read. A required header that
+        # is missing stops the run rather than reconciling the wrong column.
+        if spec is None or isinstance(spec, int):
+            return spec
+        names = [str(h or "").strip().lower() for h in header]
+        if spec.strip().lower() in names:
+            return names.index(spec.strip().lower())
+        if required:
+            raise RuntimeError(f"{fleet} debrief has no {spec!r} column ({what})")
+        return None
+
+    date_idx = _col(layout["date"], "date", True)
+    loc_idx  = _col(layout["location"], "location", False)  # None -> no filter
+    tail_idx = _col(layout["tail"], "tail", True)
+    blank_loc = layout.get("blank_location")
 
     # Service reading: either a single value-column (value-service fleets) or the
     # usual one-column-per-code mapping. numeric_service fleets (e.g. Breeze) store
@@ -905,6 +925,8 @@ def load_debrief_day(fleet, closeout_loc, date):
                 continue
         if loc_idx is not None:
             loc = r[loc_idx]
+            if blank_loc and (loc is None or not str(loc).strip()):
+                loc = blank_loc
             if fleet == "Envoy" and str(loc).strip().upper() in ENVOY_IGNORE_LOCATIONS:
                 continue  # ignore DFW Envoy rows
             if not _location_matches(loc, closeout_loc, fleet):
