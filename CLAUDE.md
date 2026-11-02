@@ -133,15 +133,16 @@ The monitor's closeout sweep is what surfaces that, a morning later.
 - **`WORKORDER_FINDINGS_ENABLED` is a rollout gate**, currently on in the
   workflow. Off, the run does the arrival check only (did a valid work order
   come through) and writes no findings.
-- **The Randomized Quality Audit Program is LIVE for PSA and GoJet** (v2,
-  Sam 2026-11-02: 1 audit drawn per work order of ≤3 planes, 2 above that;
+- **The Randomized Quality Audit Program is LIVE for PSA, GoJet AND Envoy**
+  (v2, Sam 2026-11-02: 1 audit drawn per work order of ≤3 planes, 2 above;
   enforcement is the WO upload on EVERY closeout, location-specific ones
-  included; a missed mandate is an ADMIN failure for the platform's
+  included — DFW's Envoy IHCs ride its own closeout; a missed mandate is an
+  ADMIN failure for the platform's
   Administrative Stats, never a Quality-page item — and the platform credits
   ONLY the drawn tails, no swap credit). `RANDOMIZED_FLEETS` maps each
-  launched fleet to its first ENFORCED service date (PSA/GoJet: 2026-11-03
-  — one night of grace for work orders printed before the tracker deploy);
-  Envoy is not launched. `_handle_audit_assignment` records any QUALITY
+  launched fleet to its first ENFORCED service date (all three: 2026-11-03
+  — one night of grace for work orders printed before the tracker deploy).
+  `_handle_audit_assignment` records any QUALITY
   AUDIT section it parses to `Monitoring/audit_assignments.json`
   unconditionally and flags missing/miscounted sections only for enforced
   fleet+date. `_expected_audits` must stay in lockstep with the tracker

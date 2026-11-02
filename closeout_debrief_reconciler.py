@@ -1893,7 +1893,9 @@ WO_POSTED_RETENTION_DAYS = int(os.environ.get("WO_POSTED_RETENTION_DAYS", "60"))
 RANDOMIZED_FLEETS = {
     "PSA": datetime.date(2026, 11, 3),     # launched 2026-11-02 (Sam)
     "GoJet": datetime.date(2026, 11, 3),   # launched 2026-11-02 (Sam)
-    # "Envoy": not launched — add its first enforced service date here.
+    "Envoy": datetime.date(2026, 11, 3),   # launched 2026-11-02 (Sam) —
+    # covers every closeout carrying an Envoy work order, the DFW
+    # location-specific closeout (Envoy IHCs) included.
 }
 # Hub sidecar the platform's Administrative Stats read (assignment
 # coverage — an un-audited drawn tail is an ADMIN failure, not a Quality

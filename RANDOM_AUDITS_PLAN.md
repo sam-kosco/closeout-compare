@@ -5,15 +5,15 @@ sam-kosco/closeout-compare, Foxtrot-Aviation-Services/envoy-compliance-tracker).
 Source of truth for intent: Sam's v2 direction (2026-11-02, recorded here),
 superseding the September PDF where they differ.
 
-**LAUNCH STATUS (Sam, 2026-11-02): LIVE for PSA and GoJet** — all three
-branches merged to main the same day. The psa/gojet tracker pages draw
+**LAUNCH STATUS (Sam, 2026-11-02): LIVE for PSA, GoJet AND Envoy** — all
+three branches merged to main the same day (PSA/GoJet first, Envoy a few
+hours later the same evening). All three tracker pages draw
 (`RANDOM_AUDITS = true`), closeout-compare enforces service nights from
-2026-11-03 (`RANDOMIZED_FLEETS` start dates — the one-night grace covers
-work orders printed before the Pages deploy), and the platform scores the
-mandate behind `QUALITY_RANDOM_AUDITS` (sticky: true prod / false staging).
-**Envoy is NOT launched**: index.html ships `RANDOM_AUDITS = false`, no
-`"Envoy"` entry in `RANDOMIZED_FLEETS`, and the Envoy quality-registry
-locations stay unflagged. Launching it = flip those three, nothing else.
+2026-11-03 for every fleet (`RANDOMIZED_FLEETS` start dates — the
+one-night grace covers work orders printed before the Pages deploy; DFW's
+Envoy IHCs enforce through the DFW location-specific closeout), and the
+platform scores the mandate behind `QUALITY_RANDOM_AUDITS` (sticky: true
+prod / false staging) across all 15 randomized locations.
 
 **No swap credit (Sam, 2026-11-02, at launch): the stats track ASSIGNED and
 MISSED only.** Locations audit plenty of off-list planes for the 50%
@@ -164,16 +164,19 @@ same reasoning as USER_DIGEST/RAMP_ALERTS):
   windows; `static/health.js` renders the table on `#health/stats` (which
   keeps its under-construction note for the OTHER planned admin metrics —
   closeout submission errors, budget faithfulness).
+- `/api/health/stats/<akey>/<lkey>` (`assignment_nights`) is the row's
+  drill-in (Sam, 2026-11-02): per night, every DRAWN tail marked audited —
+  linked to its SafetyCulture inspection — or missed, with the uploaded
+  work order's URL. The full trace: work order → drawn tail → audit or miss.
 - Org-chart scoped like the rest of Location Health.
 
 ## Gating / rollout
 
 - Tracker pages: `const RANDOM_AUDITS` is the per-tracker launch switch —
-  true on psa.html and gojet.html since 2026-11-02, false on index.html
-  (Envoy) until that program launches.
+  true on psa.html, gojet.html and index.html (Envoy) since 2026-11-02.
 - closeout-compare: parser is additive — no section found = no assignment
   recorded = compare behaves exactly as today. `RANDOMIZED_FLEETS` maps each
-  LAUNCHED fleet to the first SERVICE DATE enforced (PSA + GoJet:
+  LAUNCHED fleet to the first SERVICE DATE enforced (PSA, GoJet and Envoy:
   2026-11-03 — one night of grace so work orders printed before the Pages
   deploy never false-flag). The sidecar records any section it finds
   regardless, so the platform stats start the first enforced night.
@@ -181,10 +184,9 @@ same reasoning as USER_DIGEST/RAMP_ALERTS):
   true production / false staging. Off = no reads, the Admin Stats tab shows
   only the under-construction card.
 
-Launch sequence (per remaining program — Envoy): flip index.html's
-`RANDOM_AUDITS` → add `"Envoy": <first enforced service date>` to
-`RANDOMIZED_FLEETS` → add `"randomized": "Envoy"` to its quality-registry
-locations (CMH/CVG/LIT/SGF/XNA/DFW under the envoy audit).
+Every program is launched. Pausing one is the same three switches in
+reverse; adding a NEW program later = flip its page const, add its fleet +
+start date to `RANDOMIZED_FLEETS`, flag its quality-registry locations.
 
 ## v1 history (for the record)
 
