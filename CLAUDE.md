@@ -133,10 +133,14 @@ The monitor's closeout sweep is what surfaces that, a morning later.
 - **`WORKORDER_FINDINGS_ENABLED` is a rollout gate**, currently on in the
   workflow. Off, the run does the arrival check only (did a valid work order
   come through) and writes no findings.
-- **`feat/random-audits`** carries the Randomized Quality Audit Program, built
-  and verified but dark, and coordinated with branches of the same name in
-  foxtrot-platform and envoy-compliance-tracker. The three launch together; the
-  platform's `RANDOM_AUDITS_PLAN.md` is the anchor doc.
+- **`feat/random-audits`** carries the Randomized Quality Audit Program (v2,
+  Sam 2026-11-02: 1 audit drawn per work order of ≤3 planes, 2 above that;
+  enforcement is the WO upload on EVERY closeout, location-specific ones
+  included; a missed mandate is an ADMIN failure for the platform's
+  Administrative Stats, never a Quality-page item), built dark and
+  coordinated with branches of the same name in foxtrot-platform and
+  envoy-compliance-tracker. The three launch together; `RANDOM_AUDITS_PLAN.md`
+  is the anchor doc.
 
 ## Known debt
 - The repo lives on Sam's personal account and is PUBLIC, while

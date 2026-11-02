@@ -1889,8 +1889,10 @@ WO_POSTED_RETENTION_DAYS = int(os.environ.get("WO_POSTED_RETENTION_DAYS", "60"))
 # program at a time). Empty = pre-launch: the parser still RECORDS any
 # section it finds, but nothing is flagged for not having one.
 RANDOMIZED_FLEETS = set()      # e.g. {"PSA", "Envoy", "GoJet"}
-# Hub sidecar the platform's 9 AM review draw reads: one entry per
-# location+fleet+night with the randomly assigned audit tails.
+# Hub sidecar the platform's Administrative Stats read (assignment
+# coverage — an un-audited drawn tail is an ADMIN failure, not a Quality
+# page item): one entry per location+fleet+night with the randomly
+# assigned audit tails.
 AUDIT_ASSIGNMENTS_PATH = os.environ.get(
     "AUDIT_ASSIGNMENTS_PATH", "Monitoring/audit_assignments.json")
 AUDIT_ASSIGNMENTS_RETENTION_DAYS = int(os.environ.get(
@@ -2145,19 +2147,18 @@ def _canon_work_order(parsed, fleet):
 
 
 def _expected_audits(n):
-    """The program's count rule (Sam, 2026-10-01 — strictly
-    non-decreasing; the original <=5-all / 6+-half rule dropped from 5
-    required at 5 planes to 3 at 6): 1-3 planes -> all; 4-5 -> 3; 6+ ->
-    half rounded up, floored at 4 (so 6 -> 4). RANDOM_AUDITS_PLAN.md
-    carries the full table; the tracker pages' raDraw() must stay in
-    lockstep with this."""
-    return n if n <= 3 else 3 if n <= 5 else max(4, -(-n // 2))
+    """The program's count rule (Sam, 2026-11-02 — v2, superseding the
+    September ladder): 1 audit when the work order has 3 or fewer planes,
+    2 when it has more. Independent of the 50% debrief-coverage goal — a
+    drawn tail MUST be audited regardless. The tracker pages' raDraw()
+    must stay in lockstep with this (RANDOM_AUDITS_PLAN.md)."""
+    return 1 if n <= 3 else 2
 
 
 def _handle_audit_assignment(parsed, fleet, loc, date, findings, url):
     """Randomized Quality Audit Program: persist the work order's QUALITY
-    AUDIT assignment to the hub sidecar the platform's 9 AM review draw
-    reads, and flag a launched fleet whose work order lacks or miscounts
+    AUDIT assignment to the hub sidecar the platform's Administrative
+    Stats read, and flag a launched fleet whose work order lacks or miscounts
     the section. Recording is UNCONDITIONAL (a section only exists once a
     tracker page launched); the findings are gated on RANDOMIZED_FLEETS.
     Best-effort: a failed sidecar write prints and never fails the run."""
@@ -2183,7 +2184,12 @@ def _handle_audit_assignment(parsed, fleet, loc, date, findings, url):
                                    f"stale work order?"})
     try:
         state = _graph_get_json(AUDIT_ASSIGNMENTS_PATH) or {}
-        key = f"{(loc or '').upper()}|{fleet}|{date.isoformat()}"
+        # Bare airport code, same reduction as the submissions heartbeat
+        # ("DCA-PSA" -> "DCA"): the platform looks assignments up by its
+        # quality-registry location keys, which are bare codes; the FLEET in
+        # the key keeps CVG PSA and CVG Envoy apart.
+        bare = (loc or "").strip().upper().split("-")[0].strip()
+        key = f"{bare}|{fleet}|{date.isoformat()}"
         state[key] = {"required": required or listed,
                       "on_shift": n or None,
                       "tails": list(audit.get("tails") or []),
