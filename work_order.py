@@ -41,8 +41,12 @@ import datetime
 WO_DUE_SOON_DAYS = 5
 
 # Work-order fleet header ("<name> Fleet — Nightly Work Order") -> reconciler fleet.
+# REPUBLIC is the Mesa fleet's display name since the Republic buyout (Sam,
+# 2026-11-02) — the reconciler's internal fleet key stays "Mesa" (debrief
+# workbook + PA flows keep the Mesa name), so both headers map there.
 WO_FLEET_MAP = {
     "ENVOY": "Envoy", "PSA": "PSA", "GOJET": "GoJet", "MESA": "Mesa",
+    "REPUBLIC": "Mesa",
     "ULTRA": "Ultra", "BREEZE": "Breeze", "JSX": "JSX", "FRONTIER": "Frontier",
     "REGIONAL": "Regional",
 }

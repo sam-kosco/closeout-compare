@@ -113,7 +113,8 @@ DEBRIEF_SHEETS = {"GoJet": "Input", "PSA": "Debriefs", "Envoy": "Envoy General",
 
 # Per-fleet column layout of each debrief sheet, by 0-based column index. Most
 # workbooks are Date/Name/Location/Tail at cols 0-3, but two diverge:
-#   * Mesa has NO Location column (every row is implicitly IAH): Date/Name/Tail.
+#   * Mesa gained a Location column 2026-11-02 (Date/Name/Location/Tail like
+#     PSA/Envoy; historical rows backfilled IAH, IAD/Republic incoming).
 #   * Ultra ("Input" sheet) is Date/Tail/Name/Location — tail at col 1, location
 #     at col 3. Its service is a single value in the "Service" column (see
 #     DEBRIEF_VALUE_SERVICE), not a set of yes/no service-code columns.
@@ -135,7 +136,9 @@ DEBRIEF_LAYOUT = {
     "GoJet": {"date": 0, "location": 2,    "tail": 3},
     "PSA":   {"date": 0, "location": 2,    "tail": 3},
     "Envoy": {"date": 0, "location": 2,    "tail": 3},
-    "Mesa":  {"date": 0, "location": None, "tail": 2},
+    # Mesa gained a Location column 2026-11-02 (inserted at col C, IAH
+    # backfilled) ahead of IAD/Republic joining — tail moved from 2 to 3.
+    "Mesa":  {"date": 0, "location": 2,    "tail": 3},
     "Ultra": {"date": 0, "location": 3,    "tail": 1},
     "Breeze": {"date": 0, "location": 3,   "tail": 1},
     "JSX":   {"date": 3, "location": 2,    "tail": 0},
@@ -287,8 +290,7 @@ CLOSEOUT_TOKEN_MAP = {
 }
 
 # Debrief column header -> canonical (only service columns; cols 0-3 are
-# Date/Name/Location/Tail and the last is Sub ID — except the Mesa workbook,
-# which has no Location column so Tail sits at col 2).
+# Date/Name/Location/Tail and the last is Sub ID).
 DEBRIEF_COL_MAP = {
     "Interior Clean (I)": "I",
     "Exterior Clean (E)": "Ex",
@@ -851,8 +853,8 @@ def load_debrief_day(fleet, closeout_loc, date):
     """Return {tail: set(canonical services)} for the given fleet/location/date.
 
     Column positions vary by workbook and are read from DEBRIEF_LAYOUT:
-    PSA/Envoy/GoJet are Date/Name/Location/Tail at cols 0-3; Mesa has no Location
-    column (Date/Name/Tail, every row implicitly IAH); Ultra is Date/Tail/Name/
+    PSA/Envoy/GoJet/Mesa are Date/Name/Location/Tail at cols 0-3 (Mesa since
+    2026-11-02 — IAD/Republic joining IAH); Ultra is Date/Tail/Name/
     Location with its service in a single "Service" value column.
 
     Services are read one of two ways: most fleets have one yes/no column per
