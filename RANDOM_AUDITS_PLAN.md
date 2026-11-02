@@ -1,11 +1,27 @@
 # Randomized Quality Audit Program — build plan (v2)
 
-Branch: `feat/random-audits` in THREE repos (foxtrot-platform,
+Built on `feat/random-audits` in THREE repos (foxtrot-platform,
 sam-kosco/closeout-compare, Foxtrot-Aviation-Services/envoy-compliance-tracker).
-Everything ships dark — people actively use the trackers, the work orders, the
-closeouts and the Quality page, so nothing merges to any main until Sam
-launches the program. Source of truth for intent: Sam's v2 direction
-(2026-11-02, recorded here), superseding the September PDF where they differ.
+Source of truth for intent: Sam's v2 direction (2026-11-02, recorded here),
+superseding the September PDF where they differ.
+
+**LAUNCH STATUS (Sam, 2026-11-02): LIVE for PSA and GoJet** — all three
+branches merged to main the same day. The psa/gojet tracker pages draw
+(`RANDOM_AUDITS = true`), closeout-compare enforces service nights from
+2026-11-03 (`RANDOMIZED_FLEETS` start dates — the one-night grace covers
+work orders printed before the Pages deploy), and the platform scores the
+mandate behind `QUALITY_RANDOM_AUDITS` (sticky: true prod / false staging).
+**Envoy is NOT launched**: index.html ships `RANDOM_AUDITS = false`, no
+`"Envoy"` entry in `RANDOMIZED_FLEETS`, and the Envoy quality-registry
+locations stay unflagged. Launching it = flip those three, nothing else.
+
+**No swap credit (Sam, 2026-11-02, at launch): the stats track ASSIGNED and
+MISSED only.** Locations audit plenty of off-list planes for the 50%
+coverage goal, so an extra audit proves nothing about the mandate and never
+credits it. The work order still instructs the team to audit the next
+completed tail and note the swap when a drawn tail no-shows — that note is
+the paper trail a human reads; the night still counts as missed on
+Administrative Stats.
 
 ## Why v2 (Sam, 2026-11-02)
 
@@ -95,8 +111,8 @@ audit-type location — adding a program later is a registry flag, not code.
    and *Audit count off* (section disagrees with `_expected_audits`).
 3. **foxtrot-platform** (`engine/adminstats.py`, NEW in v2) joins the sidecar
    with the SafetyCulture audits `engine/quality.py` already reads and serves
-   per-location **assignment coverage** (assigned tails audited; a swap — any
-   other same-night tail — credits the count, flagged "swapped") to the
+   per-location **assignment coverage** (ASSIGNED tails audited — nothing
+   else counts, see the no-swap-credit rule above) to the
    Administrative Stats tab (`#health/stats`). The Quality Audits page is NOT
    touched.
 
@@ -135,13 +151,15 @@ read by the platform.
 false; **at launch a STICKY slot setting — true prod / false staging**,
 same reasoning as USER_DIGEST/RAMP_ALERTS):
 
-- `assignment_coverage(akey, lkey, days)` — ported from the v1 branch, the
-  verified logic: for each night with a sidecar entry, count required tails,
+- `assignment_coverage(akey, lkey, days)` — for each night with a sidecar
+  entry, count required tails and
   match submitted audits (awaiting or approved) of that type/location dated
   the assignment night or the day after (the same ±1 the debrief match uses);
-  an assigned tail audited = satisfied, an extra same-night audit credits a
-  missing one as a swap. Returns nights / required / satisfied / swaps /
-  missing.
+  an ASSIGNED tail audited = satisfied, anything else = missed (no swap
+  credit — see the launch-status note). Returns nights / required /
+  satisfied / missing. NB "assignment coverage" is this Admin Stats figure
+  only — the Quality Audits page's DEBRIEF coverage (the 50% goal) is a
+  different number and is untouched by this program.
 - `/api/health/stats` serves one row per randomized location over the 7/28/90
   windows; `static/health.js` renders the table on `#health/stats` (which
   keeps its under-construction note for the OTHER planned admin metrics —
@@ -150,20 +168,23 @@ same reasoning as USER_DIGEST/RAMP_ALERTS):
 
 ## Gating / rollout
 
-- Tracker pages: `const RANDOM_AUDITS = false;` ships to main — flipping it
-  per-program is the per-tracker launch switch (PSA first, Sam decides order).
-  TRUE on the branch for testing.
+- Tracker pages: `const RANDOM_AUDITS` is the per-tracker launch switch —
+  true on psa.html and gojet.html since 2026-11-02, false on index.html
+  (Envoy) until that program launches.
 - closeout-compare: parser is additive — no section found = no assignment
-  recorded = compare behaves exactly as today. `RANDOMIZED_FLEETS = set()`
-  ships empty; add `"PSA"` / `"Envoy"` / `"GoJet"` as each tracker launches.
-- Platform: `QUALITY_RANDOM_AUDITS` default false; sticky slot setting at
-  launch. Off = no reads, the Admin Stats tab shows only the
-  under-construction card.
+  recorded = compare behaves exactly as today. `RANDOMIZED_FLEETS` maps each
+  LAUNCHED fleet to the first SERVICE DATE enforced (PSA + GoJet:
+  2026-11-03 — one night of grace so work orders printed before the Pages
+  deploy never false-flag). The sidecar records any section it finds
+  regardless, so the platform stats start the first enforced night.
+- Platform: `QUALITY_RANDOM_AUDITS` — sticky slot setting since launch,
+  true production / false staging. Off = no reads, the Admin Stats tab shows
+  only the under-construction card.
 
-Launch sequence (per program): flip the tracker page's `RANDOM_AUDITS` → add
-the fleet to `RANDOMIZED_FLEETS` → (first launch only) set
-`QUALITY_RANDOM_AUDITS=true` sticky on production → merge the three branches
-(or flip the consts post-merge).
+Launch sequence (per remaining program — Envoy): flip index.html's
+`RANDOM_AUDITS` → add `"Envoy": <first enforced service date>` to
+`RANDOMIZED_FLEETS` → add `"randomized": "Envoy"` to its quality-registry
+locations (CMH/CVG/LIT/SGF/XNA/DFW under the envoy audit).
 
 ## v1 history (for the record)
 

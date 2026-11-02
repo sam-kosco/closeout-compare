@@ -1884,11 +1884,17 @@ WO_POSTED_STATE_PATH = os.environ.get(
 WO_POSTED_RETENTION_DAYS = int(os.environ.get("WO_POSTED_RETENTION_DAYS", "60"))
 
 # ---- Randomized Quality Audit Program (RANDOM_AUDITS_PLAN.md) --------------
-# LAUNCH SWITCH: fleets whose work orders MUST carry a QUALITY AUDIT section
-# (mirrors the tracker pages' RANDOM_AUDITS consts — flip them together, one
-# program at a time). Empty = pre-launch: the parser still RECORDS any
-# section it finds, but nothing is flagged for not having one.
-RANDOMIZED_FLEETS = set()      # e.g. {"PSA", "Envoy", "GoJet"}
+# LAUNCH SWITCH: each launched fleet -> the first SERVICE DATE the mandate is
+# enforced from (mirrors the tracker pages' RANDOM_AUDITS consts — flip them
+# together, one program at a time). The start date gives one night of grace:
+# work orders printed before the tracker's Pages deploy carry no QUALITY
+# AUDIT section and must not flag. A fleet absent here = pre-launch: the
+# parser still RECORDS any section it finds, but nothing is flagged.
+RANDOMIZED_FLEETS = {
+    "PSA": datetime.date(2026, 11, 3),     # launched 2026-11-02 (Sam)
+    "GoJet": datetime.date(2026, 11, 3),   # launched 2026-11-02 (Sam)
+    # "Envoy": not launched — add its first enforced service date here.
+}
 # Hub sidecar the platform's Administrative Stats read (assignment
 # coverage — an un-audited drawn tail is an ADMIN failure, not a Quality
 # page item): one entry per location+fleet+night with the randomly
@@ -2160,11 +2166,15 @@ def _handle_audit_assignment(parsed, fleet, loc, date, findings, url):
     AUDIT assignment to the hub sidecar the platform's Administrative
     Stats read, and flag a launched fleet whose work order lacks or miscounts
     the section. Recording is UNCONDITIONAL (a section only exists once a
-    tracker page launched); the findings are gated on RANDOMIZED_FLEETS.
+    tracker page launched); the findings are gated on RANDOMIZED_FLEETS and
+    its per-fleet start date — a closeout for a pre-launch service night
+    (its work order predates the tracker flip) must not flag.
     Best-effort: a failed sidecar write prints and never fails the run."""
+    start = RANDOMIZED_FLEETS.get(fleet)
+    enforced = start is not None and date is not None and date >= start
     audit = parsed.get("audit")
     if audit is None:
-        if fleet in RANDOMIZED_FLEETS:
+        if enforced:
             findings.append({"fleet": fleet, "type": "no_audit_section",
                              "tail": None, "service": None,
                              "detail": "work order carries no QUALITY AUDIT "
@@ -2174,7 +2184,7 @@ def _handle_audit_assignment(parsed, fleet, loc, date, findings, url):
     n = int(audit.get("on_shift") or len(parsed.get("on_shift") or ()) or 0)
     listed = len(audit.get("tails") or ())
     required = int(audit.get("required") or 0)
-    if n and (required != _expected_audits(n) or listed != required):
+    if enforced and n and (required != _expected_audits(n) or listed != required):
         findings.append({"fleet": fleet, "type": "audit_count",
                          "tail": None, "service": None,
                          "detail": f"QUALITY AUDIT section lists {listed} "
