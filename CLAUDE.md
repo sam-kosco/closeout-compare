@@ -130,6 +130,13 @@ The monitor's closeout sweep is what surfaces that, a morning later.
   snapshot rather than doing OCR. `libzbar0` is an apt package the workflow
   installs — pip alone can't provide it, so dropping that step breaks the photo
   path only, silently, for phone submissions.
+- **A nightly stats record does not always mean a work order.** The stats
+  sidecar is filled from valid work orders, so a program with no tracker
+  had no record at all. `CLOSEOUT_ONLY_STATS_FLEETS` (Breeze, for BDL) records
+  planes from the closeout with the tracked-job columns as null, not 0, and
+  `source` says which path wrote the row (`work_order`, `closeout`, or
+  `debrief_backfill` for BDL's history from 2026-08-01). The platform's
+  Administrative Stats reads this file: `ADMIN_STATS_PLAN.md` there.
 - **`WORKORDER_FINDINGS_ENABLED` is a rollout gate**, currently on in the
   workflow. Off, the run does the arrival check only (did a valid work order
   come through) and writes no findings.

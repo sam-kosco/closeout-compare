@@ -2616,6 +2616,24 @@ def send_work_order_arrival_email(location, date, entries):
 LOCATION_STATS_PATH = os.environ.get(
     "LOCATION_STATS_PATH", "Monitoring/location_nightly_stats.json")
 
+# Programs with no compliance tracker, so their closeouts never carry a work
+# order and the work-order path above never yields a volume. BDL's Breeze is the
+# one (Sam, 2026-11-04: BDL should have nightly records). Its record comes from
+# the closeout instead: planes are real, and the tracked-job columns are None,
+# NOT 0. There are no tracked jobs to miss, and a 0 would flatter a missed rate.
+CLOSEOUT_ONLY_STATS_FLEETS = {"Breeze"}
+
+
+def closeout_only_volumes(report):
+    """Nightly volume, in the shape _record_location_stats takes, for each
+    no-tracker program on this closeout. Empty for everyone else."""
+    return [{"fleet": fleet, "source": "closeout", "wo_url": "",
+             "planes": info.get("closeout_tail_count", 0),
+             "overdue_jobs": None, "due_soon_jobs": None,
+             "overdue_completed": None, "due_soon_completed": None}
+            for fleet, info in (report.get("fleets") or {}).items()
+            if fleet in CLOSEOUT_ONLY_STATS_FLEETS]
+
 
 def _record_location_stats(volumes, loc, date, submitter):
     """Upsert the objective nightly volume per (location, night, program) into the
@@ -2641,6 +2659,7 @@ def _record_location_stats(volumes, loc, date, submitter):
             "overdue_completed": v.get("overdue_completed", 0),
             "due_soon_completed": v.get("due_soon_completed", 0),
             "wo_url": v.get("wo_url") or "",
+            "source": v.get("source") or "work_order",
             "submitter": submitter or None,
             "updated_utc": now,
         }
@@ -2745,6 +2764,15 @@ def main():
                     print("[SEND_EMAIL=false — arrival email not sent]", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"\n[work order check failed: {e}]", flush=True)
+
+    # Programs with no tracker get their nightly volume from the closeout.
+    if send_on:
+        try:
+            _record_location_stats(closeout_only_volumes(report),
+                                   report.get("location"), report.get("date"),
+                                   report.get("submitter"))
+        except Exception as e:  # noqa: BLE001
+            print(f"\n[closeout-only stats record skipped: {e}]", flush=True)
 
     if report.get("has_discrepancies"):
         # Deterministic by default (no API). Only when USE_AI_DISCREPANCY_EMAIL is
