@@ -1763,12 +1763,24 @@ def _record_closeout_submission(location, service_date, submitter):
     # Fri/Sat/Sun individually, which the high-water mark alone can't
     # answer. Rolling 14 nights is plenty for any lookback it does.
     covered = set(prev.get("covered_dates") or [])
+    seen_before = covered | {prev.get("last_service_date")}
     covered.update(x for x in (prev.get("last_service_date"), svc) if x)
+    newest = sorted(covered)[-14:]
+    # When each night was FIRST filed (Sam, 2026-11-06): a late closeout is a
+    # major admin error, and the monitor only runs on weekdays, so it can't see
+    # a Friday or Saturday night filed late unless the filing time is kept here.
+    # A resubmission keeps the first stamp, and a night already covered before
+    # this existed gets none: unknown is not the same as late.
+    first_filed = {n: t for n, t in (prev.get("first_filed") or {}).items()
+                   if n in newest}
+    if svc and svc not in seen_before and svc in newest:
+        first_filed[svc] = now
     locs[loc] = {
         "last_submission_utc": now,
         "last_service_date": svc,
         "max_service_date": max(candidates) if candidates else None,
-        "covered_dates": sorted(covered)[-14:],
+        "covered_dates": newest,
+        "first_filed": first_filed,
         "submitter": submitter or None,
     }
     state["locations"] = locs

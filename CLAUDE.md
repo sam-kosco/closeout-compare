@@ -114,7 +114,8 @@ The monitor's closeout sweep is what surfaces that, a morning later.
   locations by bare airport code; `_record_closeout_submission` reduces
   `DCA-PSA` to `DCA` so both sides agree. `covered_dates` is a rolling 14
   nights, which is what lets the monitor's Monday scan judge Friday, Saturday
-  and Sunday individually. Every reconciled closeout records (Sam, 2026-10-01 —
+  and Sunday individually. `first_filed` holds when each of those nights was first
+  filed, which is how the monitor judges a late closeout on all seven nights. Every reconciled closeout records (Sam, 2026-10-01 —
   it was named-key only before, which left the ten general-form stations
   unwatchable). Shortening the window or changing the key breaks the monitor
   quietly.
