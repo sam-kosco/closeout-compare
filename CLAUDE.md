@@ -142,7 +142,10 @@ The monitor's closeout sweep is what surfaces that, a morning later.
   workflow. Off, the run does the arrival check only (did a valid work order
   come through) and writes no findings.
 - **The Randomized Quality Audit Program is LIVE for PSA, GoJet AND Envoy**
-  (v2, Sam 2026-11-02: 1 audit drawn per work order of ≤3 planes, 2 above;
+  (v2, launched 2026-11-02; count rule since 2026-11-09: HALF the work
+  order's planes, rounded up, to match the 50% coverage goal — the earlier
+  1-at-≤3-planes/2-above count is still accepted, never expected, because
+  stale browser tabs keep printing it;
   enforcement is the WO upload on EVERY closeout, location-specific ones
   included — DFW's Envoy IHCs ride its own closeout; a missed mandate is an
   ADMIN failure for the platform's

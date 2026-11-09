@@ -15,6 +15,13 @@ Envoy IHCs enforce through the DFW location-specific closeout), and the
 platform scores the mandate behind `QUALITY_RANDOM_AUDITS` (sticky: true
 prod / false staging) across all 15 randomized locations.
 
+**Count rule changed 2026-11-09 (Sam): HALF the planes on the work order,
+rounded up** — "assign audits on 50% of planes now to match the expected
+debrief coverage … for an odd number of planes, round up". Replaces the
+launch rule (1 at 3 or fewer planes, 2 above) everywhere below. Nothing
+else moved: only drawn tails satisfy the mandate, no swap credit, misses
+live on Administrative Stats.
+
 **No swap credit (Sam, 2026-11-02, at launch): the stats track ASSIGNED and
 MISSED only.** Locations audit plenty of off-list planes for the 50%
 coverage goal, so an extra audit proves nothing about the mandate and never
@@ -34,9 +41,10 @@ page and planned its own RM/Director review draw. Three facts moved:
    Envoy Verified Clean audit. Nothing else qualifies.
 2. **The team's quality goal is now 50% debrief coverage** per location
    (`COVERAGE_GOAL`, live on main since 2026-10-19). The work-order mandate is
-   **independent of it** — drawn tails neither satisfy nor replace the 50%;
-   they are an extra, non-negotiable floor: if a tail is selected on the work
-   order, it needs an audit.
+   **scored separately from it** — a non-negotiable floor: if a tail is
+   selected on the work order, it needs an audit. Since 2026-11-09 the draw
+   is SIZED to the goal (half the planes), so a team that audits its drawn
+   tails lands at about 50% coverage for that work order.
 3. **The review draw shipped separately.** Main's `engine/quality_reviews.py`
    (the live 7 AM RM/Director assignment draw, merged 2026-10-20) superseded
    this branch set's review-pool design. This branch set no longer touches the
@@ -49,8 +57,8 @@ page and planned its own RM/Director review draw. Three facts moved:
 ## The program in one paragraph (v2)
 
 Every nightly work order generated on the PSA, Envoy and GoJet tracker pages
-draws tails at random that MUST be audited that night — **1 tail when the work
-order has 3 or fewer planes, 2 when it has more than 3** (Sam, 2026-11-02).
+draws tails at random that MUST be audited that night — **half the planes on
+the work order, rounded up** (Sam, 2026-11-09; 1-or-2 at launch).
 The drawn tails are printed on the work-order PDF (highlighted in the on-shift
 list, an `AUDIT` chip on their service blocks, and a machine-parseable
 **QUALITY AUDIT** section), so nobody picks their best-looking plane and local
@@ -64,16 +72,26 @@ fleets) flags a work order with a missing or miscounted section. The platform
 joins the sidecar to the SafetyCulture audits it already reads and reports
 per-location **assignment coverage** on Administrative Stats.
 
-## Count rule (Sam, 2026-11-02)
+## Count rule (Sam, 2026-11-09)
 
 ```
-n planes on the work order ≤ 3  →  1 audit
-n planes on the work order > 3  →  2 audits
+audits = ceil(n / 2)      n = planes on the work order
+1 → 1   2 → 1   3 → 2   4 → 2   5 → 3   6 → 3   7 → 4   8 → 4 …
 ```
 
 It lives in exactly TWO places that must stay in lockstep: each tracker page's
 `raDraw()` and closeout-compare's `_expected_audits()`. (v1's non-decreasing
-ladder — all/3/half-floored-at-4 — is superseded.)
+ladder — all/3/half-floored-at-4 — and the launch rule, 1 at ≤3 planes and 2
+above, are both superseded.)
+
+**Transition tolerance.** closeout-compare still ACCEPTS the launch rule's
+count (`_superseded_audits`) without an *Audit count off* finding: a work
+order printed before the 2026-11-09 Pages deploy, or from a browser tab
+still running old page code (tracker pages refresh data, never code —
+`ADMIN_STATS_PLAN.md`), carries it through no fault of the team. The
+sidecar records what was actually drawn, so Administrative Stats scores
+that night against the tails the crew was really given. Remove the
+tolerance once the tracker's reload-on-stale version check ships.
 
 ## Scope
 
@@ -128,7 +146,11 @@ note the swap on the audit.
 - ASCII `--` ON PURPOSE: jsPDF/helvetica mangles em-dashes in extracted text.
 - Header regex: `QUALITY AUDIT\s*[-–—]+\s*(?:ALL\s+(\d+)|(\d+) of (\d+))`
 - Tails: following `\[ \]\s*([A-Z0-9]+)` lines until a non-matching line.
-- With the v2 count rule the `ALL n planes` form only occurs at n=1
+- The list may cross a page break (half of a 30-plane night is 15 lines):
+  the page footer (`Generated …`) then lands between `[ ]` lines in the
+  extracted text, so the parser carries the audit section across footers
+  (fixed 2026-11-09 — it used to end the section and drop page 2's tails).
+- With the half rule the `ALL n planes` form only occurs at n=1
   (`QUALITY AUDIT -- ALL 1 planes`); the parser treats both forms identically.
 - The v1 contract was VERIFIED 2026-09-30 with pypdf (the reconciler's own
   extractor) against generated PSA PDFs; v2 changes only the counts, not the
@@ -196,7 +218,8 @@ start date to `RANDOMIZED_FLEETS`, flag its quality-registry locations.
   and the closeout-compare parser carried into v2 ARE those verified pieces —
   only the count rule changed.
 - v1's count rule (1–3 all; 4–5 → 3; 6+ → max(4, ⌈n/2⌉)) superseded
-  2026-11-02 by the 1-or-2 rule.
+  2026-11-02 by the 1-or-2 rule, itself superseded 2026-11-09 by half
+  the planes rounded up.
 - v1's platform half (review-pool draw, Approvals redesign, quality.js) was
   superseded by main's `engine/quality_reviews.py` (live since 2026-10-20) and
   is dropped; its `assignment_coverage` survives in `engine/adminstats.py`.

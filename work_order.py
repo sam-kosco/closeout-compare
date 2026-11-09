@@ -281,7 +281,15 @@ def parse_work_order(text):
                 section, cur = "audit", None
             continue
         if up.startswith("GENERATED") or up.startswith("FOXTROT AVIATION"):
-            section, cur = None, None       # footer / sub-header
+            # footer / sub-header ends a section — EXCEPT the QUALITY AUDIT
+            # list, which is the last thing on the work order and, at half
+            # the planes (2026-11-09), routinely runs across a page break:
+            # the page-1 footer then sits between its "[ ] TAIL" lines and
+            # resetting here dropped every tail on page 2 (15 drawn, 2
+            # read). Only "[ ] TAIL" lines are consumed in that section, so
+            # carrying it over a footer is safe.
+            if section != "audit":
+                section, cur = None, None
             continue
         if section is None:
             continue

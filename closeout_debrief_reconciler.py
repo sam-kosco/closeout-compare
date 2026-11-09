@@ -2167,11 +2167,23 @@ def _canon_work_order(parsed, fleet):
 
 
 def _expected_audits(n):
-    """The program's count rule (Sam, 2026-11-02 — v2, superseding the
-    September ladder): 1 audit when the work order has 3 or fewer planes,
-    2 when it has more. Independent of the 50% debrief-coverage goal — a
-    drawn tail MUST be audited regardless. The tracker pages' raDraw()
-    must stay in lockstep with this (RANDOM_AUDITS_PLAN.md)."""
+    """The program's count rule (Sam, 2026-11-09): HALF the planes on the
+    work order, rounded UP on an odd count (1->1, 2->1, 3->2, 4->2,
+    5->3 ...), so the nightly draw matches the 50% debrief-coverage goal.
+    A drawn tail MUST be audited. The tracker pages' raDraw() must stay in
+    lockstep with this (RANDOM_AUDITS_PLAN.md)."""
+    return (n + 1) // 2
+
+
+def _superseded_audits(n):
+    """The 2026-11-02 rule the half rule replaced: 1 audit at 3 or fewer
+    planes, 2 above. Still ACCEPTED by `_handle_audit_assignment`, never
+    expected: a work order carrying this count was printed before the
+    2026-11-09 page deploy or from a browser tab still running the old
+    page code (tracker pages refresh their data, never their code — see
+    the platform's ADMIN_STATS_PLAN.md; Sam: not the team's fault, never
+    counts against them). Drop this once the tracker's reload-on-stale
+    version check ships."""
     return 1 if n <= 3 else 2
 
 
@@ -2198,7 +2210,11 @@ def _handle_audit_assignment(parsed, fleet, loc, date, findings, url):
     n = int(audit.get("on_shift") or len(parsed.get("on_shift") or ()) or 0)
     listed = len(audit.get("tails") or ())
     required = int(audit.get("required") or 0)
-    if enforced and n and (required != _expected_audits(n) or listed != required):
+    # The count is off when the section disagrees with itself, or matches
+    # NEITHER the half rule nor the rule it superseded (a stale page's
+    # draw is recorded as drawn, not flagged — see _superseded_audits).
+    if enforced and n and (listed != required or required not in (
+            _expected_audits(n), _superseded_audits(n))):
         findings.append({"fleet": fleet, "type": "audit_count",
                          "tail": None, "service": None,
                          "detail": f"QUALITY AUDIT section lists {listed} "
